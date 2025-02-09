@@ -83,9 +83,18 @@ pub enum Commands {
 
     /// Download a single file
     DownloadFile {
+        /// Optional user ID override; if omitted, read from .pipe-cli.json
+        #[arg(long)]
         user_id: Option<String>,
+
+        /// Optional user app key override; if omitted, read from .pipe-cli.json
+        #[arg(long)]
         user_app_key: Option<String>,
+
+        /// Required remote file name on the server
         file_name: String,
+
+        /// Required local file path to store the downloaded file
         output_path: String,
     },
 
