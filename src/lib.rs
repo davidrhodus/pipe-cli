@@ -31,7 +31,8 @@ pub struct VersionCheckRequest {
 #[derive(Deserialize, Debug)]
 pub struct VersionCheckResponse {
     pub is_latest: bool,
-    pub download_link: String,
+    #[serde(default)]
+    pub download_link: Option<String>,
     #[serde(default)]
     pub latest_version: Option<String>,
     #[serde(default)]
@@ -499,7 +500,13 @@ async fn check_version(client: &Client, base_url: &str) -> Result<()> {
         if let Some(version) = &response.latest_version {
             println!("Latest version: {}", version);
         }
-        println!("Download the latest version here: {}", response.download_link);
+
+        // Only print download link if present
+        if let Some(link) = &response.download_link {
+            println!("Download the latest version here: {}", link);
+        } else {
+            println!("(No download link provided by the server.)");
+        }
 
         if let Some(notes) = response.release_notes {
             println!("\nRelease notes:\n{}", notes);
