@@ -4,13 +4,14 @@ use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose, Engine as _};
 use bytes::Bytes;
 use clap::{Parser, Subcommand};
+use futures_util::future;
 use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::{Body, Client};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
-use std::io::{Write as IoWrite}; // For writeln!
+use std::io::Write as IoWrite; // For writeln!
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs::File as TokioFile;
@@ -463,7 +464,12 @@ pub fn get_upload_log_path() -> PathBuf {
     }
 }
 
-pub fn append_to_upload_log(local_path: &str, remote_path: &str, status: &str, message: &str) -> Result<()> {
+pub fn append_to_upload_log(
+    local_path: &str,
+    remote_path: &str,
+    status: &str,
+    message: &str,
+) -> Result<()> {
     let log_path = get_upload_log_path();
     let mut file = OpenOptions::new()
         .create(true)
@@ -571,7 +577,11 @@ async fn improved_download_file(
                 retry_count += 1;
                 tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                 delay = std::cmp::min(delay * 2, MAX_RETRY_DELAY_MS);
-                progress.set_message(format!("Retrying... Attempt {}/{}", retry_count + 1, MAX_RETRIES));
+                progress.set_message(format!(
+                    "Retrying... Attempt {}/{}",
+                    retry_count + 1,
+                    MAX_RETRIES
+                ));
             }
         }
     }
@@ -620,7 +630,8 @@ async fn upload_file(
     full_url: &str,
     file_name_in_bucket: &str,
 ) -> Result<String> {
-    let f = TokioFile::open(file_path).await
+    let f = TokioFile::open(file_path)
+        .await
         .map_err(|e| anyhow!("Failed to open local file: {}", e))?;
     let meta = f.metadata().await?;
     let file_size = meta.len();
@@ -669,11 +680,11 @@ async fn upload_file_priority(
             .progress_chars("#>-"),
     );
 
+    use futures_util::Stream;
     use std::{
         pin::Pin,
         task::{Context, Poll},
     };
-    use futures_util::Stream;
     use tokio_util::io::ReaderStream as InnerReaderStream;
 
     struct ProgressStream<S> {
@@ -688,10 +699,7 @@ async fn upload_file_priority(
     {
         type Item = Result<Bytes, std::io::Error>;
 
-        fn poll_next(
-            mut self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-        ) -> Poll<Option<Self::Item>> {
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
             match Pin::new(&mut self.inner).poll_next(cx) {
                 Poll::Ready(Some(Ok(chunk))) => {
                     self.bytes_uploaded += chunk.len() as u64;
@@ -911,7 +919,7 @@ pub async fn run_cli() -> Result<()> {
                         &file_path,
                         &uploaded_filename,
                         "SUCCESS",
-                        &format!("Non-priority upload ({} epochs)", epochs_final)
+                        &format!("Non-priority upload ({} epochs)", epochs_final),
                     )?;
                 }
                 Err(e) => {
@@ -920,7 +928,7 @@ pub async fn run_cli() -> Result<()> {
                         &file_path,
                         &file_name,
                         "FAIL",
-                        &format!("Non-priority upload error: {}", e)
+                        &format!("Non-priority upload error: {}", e),
                     )?;
                     return Err(e);
                 }
@@ -986,8 +994,7 @@ pub async fn run_cli() -> Result<()> {
             user_id,
             user_app_key,
         } => {
-            let (uid, key) =
-                get_final_user_id_and_app_key(user_id, user_app_key)?;
+            let (uid, key) = get_final_user_id_and_app_key(user_id, user_app_key)?;
 
             let req_body = CheckWalletRequest {
                 user_id: uid,
@@ -1022,8 +1029,7 @@ pub async fn run_cli() -> Result<()> {
             user_id,
             user_app_key,
         } => {
-            let (uid, key) =
-                get_final_user_id_and_app_key(user_id, user_app_key)?;
+            let (uid, key) = get_final_user_id_and_app_key(user_id, user_app_key)?;
 
             let req_body = CheckCustomTokenRequest {
                 user_id: uid,
@@ -1059,8 +1065,7 @@ pub async fn run_cli() -> Result<()> {
             user_app_key,
             amount_sol,
         } => {
-            let (uid, key) =
-                get_final_user_id_and_app_key(user_id, user_app_key)?;
+            let (uid, key) = get_final_user_id_and_app_key(user_id, user_app_key)?;
 
             let req_body = SwapSolForPipeRequest {
                 user_id: uid,
@@ -1133,8 +1138,7 @@ pub async fn run_cli() -> Result<()> {
             to_pubkey,
             amount_sol,
         } => {
-            let (uid, key) =
-                get_final_user_id_and_app_key(user_id, user_app_key)?;
+            let (uid, key) = get_final_user_id_and_app_key(user_id, user_app_key)?;
 
             let req_body = WithdrawSolRequest {
                 user_id: uid,
@@ -1173,8 +1177,7 @@ pub async fn run_cli() -> Result<()> {
             to_pubkey,
             amount,
         } => {
-            let (uid, key) =
-                get_final_user_id_and_app_key(user_id, user_app_key)?;
+            let (uid, key) = get_final_user_id_and_app_key(user_id, user_app_key)?;
 
             let req_body = WithdrawTokenRequest {
                 user_id: uid,
@@ -1275,81 +1278,132 @@ pub async fn run_cli() -> Result<()> {
             user_app_key,
             directory_path,
         } => {
-            let (uid, key) =
-                get_final_user_id_and_app_key(user_id, user_app_key)?;
+            let (uid, key) = get_final_user_id_and_app_key(user_id, user_app_key)?;
 
             let dir = Path::new(&directory_path);
             if !dir.is_dir() {
-                return Err(anyhow!("Provided path is not a directory: {}", directory_path));
+                return Err(anyhow!(
+                    "Provided path is not a directory: {}",
+                    directory_path
+                ));
             }
 
-            let file_entries: Vec<_> = WalkDir::new(dir)
+            // Count files first for progress bar without storing all paths
+            let total_files = WalkDir::new(dir)
                 .into_iter()
-                .filter_map(|entry| {
-                    match entry {
-                        Ok(e) if e.path().is_file() => Some(e.path().to_owned()),
-                        _ => None,
-                    }
+                .filter_map(|entry| match entry {
+                    Ok(e) if e.path().is_file() => Some(1),
+                    _ => None,
                 })
-                .collect();
+                .count();
+
+            println!("Found {} files to upload", total_files);
+
+            let progress = Arc::new(ProgressBar::new(total_files as u64));
+            progress.set_style(
+                ProgressStyle::default_bar()
+                    .template(
+                        "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] \
+                         {pos}/{len} ({eta}) - {msg}",
+                    )
+                    .unwrap()
+                    .progress_chars("#>-"),
+            );
+            progress.set_message("Uploading files...");
 
             let concurrency_limit = 100;
             let sem = Arc::new(Semaphore::new(concurrency_limit));
-            let mut handles = Vec::new();
 
-            for path in file_entries {
-                let sem_clone = Arc::clone(&sem);
-                let client_clone = client.clone();
-                let base_url_clone = base_url.to_string();
-                let user_id_clone = uid.clone();
-                let user_app_key_clone = key.clone();
+            // Process in batches to avoid OOM
+            const BATCH_SIZE: usize = 1000;
+            let mut file_iter = WalkDir::new(dir).into_iter();
+            let mut active_handles = Vec::with_capacity(concurrency_limit);
 
-                let rel_path = match path.strip_prefix(dir) {
-                    Ok(r) => r.to_string_lossy().to_string(),
-                    Err(_) => path
-                        .file_name()
-                        .map(|os| os.to_string_lossy().to_string())
-                        .unwrap_or_else(|| "untitled".to_string()),
-                };
-
-                let handle = tokio::spawn(async move {
-                    let _permit = sem_clone.acquire_owned().await.unwrap();
-                    let url_no_epochs = format!(
-                        "{}/upload?user_id={}&user_app_key={}&file_name={}",
-                        base_url_clone, user_id_clone, user_app_key_clone, rel_path
-                    );
-
-                    match upload_file(&client_clone, &path, &url_no_epochs, &rel_path).await {
-                        Ok(uploaded_file) => {
-                            println!("Uploaded: {}", uploaded_file);
-                            let _ = append_to_upload_log(
-                                &path.display().to_string(),
-                                &uploaded_file,
-                                "SUCCESS",
-                                "Directory upload success"
-                            );
+            loop {
+                // Collect a small batch of files
+                let mut batch = Vec::with_capacity(BATCH_SIZE);
+                for _ in 0..BATCH_SIZE {
+                    match file_iter.next() {
+                        Some(Ok(entry)) if entry.path().is_file() => {
+                            batch.push(entry.path().to_owned())
                         }
-                        Err(e) => {
-                            eprintln!("Failed to upload {}: {}", path.display(), e);
-                            let _ = append_to_upload_log(
-                                &path.display().to_string(),
-                                &rel_path,
-                                "FAIL",
-                                &format!("Directory upload error: {}", e)
-                            );
-                        }
+                        Some(_) => continue, // Skip directories or errors
+                        None => break,       // No more files
                     }
-                });
+                }
 
-                handles.push(handle);
+                if batch.is_empty() {
+                    break; // No more files to process
+                }
+
+                // Process this batch
+                for path in batch {
+                    let sem_clone = Arc::clone(&sem);
+                    let client_clone = client.clone();
+                    let base_url_clone = base_url.to_string();
+                    let user_id_clone = uid.clone();
+                    let user_app_key_clone = key.clone();
+                    let progress_clone = Arc::clone(&progress);
+
+                    let rel_path = match path.strip_prefix(dir) {
+                        Ok(r) => r.to_string_lossy().to_string(),
+                        Err(_) => path
+                            .file_name()
+                            .map(|os| os.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "untitled".to_string()),
+                    };
+
+                    let handle = tokio::spawn(async move {
+                        let _permit = sem_clone.acquire_owned().await.unwrap();
+                        let url_no_epochs = format!(
+                            "{}/upload?user_id={}&user_app_key={}&file_name={}",
+                            base_url_clone, user_id_clone, user_app_key_clone, rel_path
+                        );
+
+                        match upload_file(&client_clone, &path, &url_no_epochs, &rel_path).await {
+                            Ok(uploaded_file) => {
+                                println!("Uploaded: {}", uploaded_file);
+                                let _ = append_to_upload_log(
+                                    &path.display().to_string(),
+                                    &uploaded_file,
+                                    "SUCCESS",
+                                    "Directory upload success",
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!("Failed to upload {}: {}", path.display(), e);
+                                let _ = append_to_upload_log(
+                                    &path.display().to_string(),
+                                    &rel_path,
+                                    "FAIL",
+                                    &format!("Directory upload error: {}", e),
+                                );
+                            }
+                        }
+                        progress_clone.inc(1);
+                    });
+
+                    active_handles.push(handle);
+
+                    // Wait for some handles to complete if we've hit the concurrency limit
+                    if active_handles.len() >= concurrency_limit {
+                        let (completed, _, remaining) = future::select_all(active_handles).await;
+                        let _ = completed; // Ignore the result
+                        active_handles = remaining;
+                    }
+                }
             }
 
-            for h in handles {
-                let _ = h.await;
+            // Wait for remaining handles to complete
+            while !active_handles.is_empty() {
+                let (completed, _, remaining) = future::select_all(active_handles).await;
+                let _ = completed; // Ignore the result
+                active_handles = remaining;
             }
 
+            progress.finish_with_message("Directory upload complete!");
             println!(
-                "Directory upload complete. Check the log file for details:\n  {}",
+                "Check the log file for details:\n  {}",
                 get_upload_log_path().display()
             );
         }
@@ -1365,14 +1419,20 @@ pub async fn run_cli() -> Result<()> {
 
             let dir = Path::new(&directory_path);
             if !dir.is_dir() {
-                return Err(anyhow!("Provided path is not a directory: {}", directory_path));
+                return Err(anyhow!(
+                    "Provided path is not a directory: {}",
+                    directory_path
+                ));
             }
 
             // Get current priority fee from server
             let url = format!("{}/getPriorityFee", base_url);
             let resp = client.get(&url).send().await?;
             let fee_resp: PriorityFeeResponse = resp.json().await?;
-            println!("Current priority fee: {} tokens/GB", fee_resp.priority_fee_per_gb);
+            println!(
+                "Current priority fee: {} tokens/GB",
+                fee_resp.priority_fee_per_gb
+            );
             println!("Starting priority upload of directory...");
 
             // Read upload log if skip_uploaded == true
@@ -1383,100 +1443,139 @@ pub async fn run_cli() -> Result<()> {
                     let contents = fs::read_to_string(&log_path)?;
                     for line in contents.lines() {
                         if let Ok(entry) = serde_json::from_str::<UploadLogEntry>(line) {
-                            if entry.status.contains("SUCCESS") || entry.status.contains("BACKGROUND") {
+                            if entry.status.contains("SUCCESS")
+                                || entry.status.contains("BACKGROUND")
+                            {
                                 previously_uploaded.insert(entry.local_path);
                             }
                         }
                     }
                 }
-                println!("Found {} previously uploaded files in log", previously_uploaded.len());
+                println!(
+                    "Found {} previously uploaded files in log",
+                    previously_uploaded.len()
+                );
             }
 
-            let file_entries: Vec<_> = WalkDir::new(dir)
+            // Count files first for progress bar without storing all paths
+            let total_files = WalkDir::new(dir)
                 .into_iter()
-                .filter_map(|entry| {
-                    match entry {
-                        Ok(e) if e.path().is_file() => Some(e.path().to_owned()),
-                        _ => None,
-                    }
+                .filter_map(|entry| match entry {
+                    Ok(e) if e.path().is_file() => Some(1),
+                    _ => None,
                 })
-                .collect();
+                .count();
 
-            println!("Found {} files to upload", file_entries.len());
+            println!("Found {} files to upload", total_files);
 
-            let total_files = file_entries.len() as u64;
-            let progress = Arc::new(ProgressBar::new(total_files));
+            let progress = Arc::new(ProgressBar::new(total_files as u64));
             progress.set_style(
                 ProgressStyle::default_bar()
                     .template(
                         "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] \
-                         {pos}/{len} ({eta}) - {msg}"
+                         {pos}/{len} ({eta}) - {msg}",
                     )
                     .unwrap()
                     .progress_chars("#>-"),
             );
             progress.set_message("Uploading files...");
 
-            let sem = Arc::new(Semaphore::new(concurrency));
-            let mut handles = Vec::new();
+            let concurrency_limit = 100;
+            let sem = Arc::new(Semaphore::new(concurrency_limit));
 
-            for path in file_entries {
-                if skip_uploaded && previously_uploaded.contains(&path.display().to_string()) {
-                    println!("Skipping previously uploaded file: {}", path.display());
-                    progress.inc(1);
-                    continue;
+            // Process in batches to avoid OOM
+            const BATCH_SIZE: usize = 1000;
+            let mut file_iter = WalkDir::new(dir).into_iter();
+            let mut active_handles = Vec::with_capacity(concurrency_limit);
+
+            loop {
+                // Collect a small batch of files
+                let mut batch = Vec::with_capacity(BATCH_SIZE);
+                for _ in 0..BATCH_SIZE {
+                    match file_iter.next() {
+                        Some(Ok(entry)) if entry.path().is_file() => {
+                            batch.push(entry.path().to_owned())
+                        }
+                        Some(_) => continue, // Skip directories or errors
+                        None => break,       // No more files
+                    }
                 }
 
-                let sem_clone = Arc::clone(&sem);
-                let client_clone = client.clone();
-                let base_url_clone = base_url.to_string();
-                let user_id_clone = uid.clone();
-                let user_app_key_clone = key.clone();
-                let progress_clone = Arc::clone(&progress);
+                if batch.is_empty() {
+                    break; // No more files to process
+                }
 
-                let rel_path = match path.strip_prefix(dir) {
-                    Ok(r) => r.to_string_lossy().to_string(),
-                    Err(_) => path
-                        .file_name()
-                        .map(|os| os.to_string_lossy().to_string())
-                        .unwrap_or_else(|| "untitled".to_string()),
-                };
-
-                let handle = tokio::spawn(async move {
-                    let _permit = sem_clone.acquire_owned().await.unwrap();
-                    let url_no_epochs = format!(
-                        "{}/priorityUpload?user_id={}&user_app_key={}&file_name={}",
-                        base_url_clone, user_id_clone, user_app_key_clone, rel_path
-                    );
-
-                    match upload_file_priority(&client_clone, &path, &url_no_epochs, &rel_path).await {
-                        Ok(uploaded_file) => {
-                            println!("Priority Uploaded: {}", uploaded_file);
-                            let _ = append_to_upload_log(
-                                &path.display().to_string(),
-                                &uploaded_file,
-                                "PRIORITY SUCCESS",
-                                "Priority directory upload success"
-                            );
-                        }
-                        Err(e) => {
-                            eprintln!("Failed priority upload {}: {}", path.display(), e);
-                            let _ = append_to_upload_log(
-                                &path.display().to_string(),
-                                &rel_path,
-                                "PRIORITY FAIL",
-                                &format!("Priority directory upload error: {}", e)
-                            );
-                        }
+                // Process this batch
+                for path in batch {
+                    if skip_uploaded && previously_uploaded.contains(&path.display().to_string()) {
+                        println!("Skipping previously uploaded file: {}", path.display());
+                        progress.inc(1);
+                        continue;
                     }
-                    progress_clone.inc(1);
-                });
 
-                handles.push(handle);
+                    let sem_clone = Arc::clone(&sem);
+                    let client_clone = client.clone();
+                    let base_url_clone = base_url.to_string();
+                    let user_id_clone = uid.clone();
+                    let user_app_key_clone = key.clone();
+                    let progress_clone = Arc::clone(&progress);
+
+                    let rel_path = match path.strip_prefix(dir) {
+                        Ok(r) => r.to_string_lossy().to_string(),
+                        Err(_) => path
+                            .file_name()
+                            .map(|os| os.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "untitled".to_string()),
+                    };
+
+                    let handle = tokio::spawn(async move {
+                        let _permit = sem_clone.acquire_owned().await.unwrap();
+                        let url_no_epochs = format!(
+                            "{}/priorityUpload?user_id={}&user_app_key={}&file_name={}",
+                            base_url_clone, user_id_clone, user_app_key_clone, rel_path
+                        );
+
+                        match upload_file_priority(&client_clone, &path, &url_no_epochs, &rel_path)
+                            .await
+                        {
+                            Ok(uploaded_file) => {
+                                println!("Priority Uploaded: {}", uploaded_file);
+                                let _ = append_to_upload_log(
+                                    &path.display().to_string(),
+                                    &uploaded_file,
+                                    "PRIORITY SUCCESS",
+                                    "Priority directory upload success",
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!("Failed priority upload {}: {}", path.display(), e);
+                                let _ = append_to_upload_log(
+                                    &path.display().to_string(),
+                                    &rel_path,
+                                    "PRIORITY FAIL",
+                                    &format!("Priority directory upload error: {}", e),
+                                );
+                            }
+                        }
+                        progress_clone.inc(1);
+                    });
+
+                    active_handles.push(handle);
+
+                    // Wait for some handles to complete if we've hit the concurrency limit
+                    if active_handles.len() >= concurrency_limit {
+                        let (completed, _, remaining) = future::select_all(active_handles).await;
+                        let _ = completed; // Ignore the result
+                        active_handles = remaining;
+                    }
+                }
             }
 
-            for h in handles {
-                let _ = h.await;
+            // Wait for remaining handles to complete
+            while !active_handles.is_empty() {
+                let (completed, _, remaining) = future::select_all(active_handles).await;
+                let _ = completed; // Ignore the result
+                active_handles = remaining;
             }
 
             progress.finish_with_message("Priority directory upload complete!");
@@ -1533,12 +1632,15 @@ pub async fn run_cli() -> Result<()> {
 
             match upload_file_priority(&client, local_path, &url_with_epochs, &file_name).await {
                 Ok(uploaded_filename) => {
-                    println!("Priority file uploaded (or backgrounded): {}", uploaded_filename);
+                    println!(
+                        "Priority file uploaded (or backgrounded): {}",
+                        uploaded_filename
+                    );
                     append_to_upload_log(
                         &file_path,
                         &uploaded_filename,
                         "PRIORITY SUCCESS",
-                        &format!("Priority upload ({} epochs)", epochs_final)
+                        &format!("Priority upload ({} epochs)", epochs_final),
                     )?;
                 }
                 Err(e) => {
@@ -1547,7 +1649,7 @@ pub async fn run_cli() -> Result<()> {
                         &file_path,
                         &file_name,
                         "PRIORITY FAIL",
-                        &format!("Priority single upload error: {}", e)
+                        &format!("Priority single upload error: {}", e),
                     )?;
                     return Err(e);
                 }
@@ -1612,11 +1714,7 @@ pub async fn run_cli() -> Result<()> {
             };
 
             let url = format!("{}/extendStorage", base_url);
-            let resp = client
-                .post(url)
-                .json(&req_body)
-                .send()
-                .await?;
+            let resp = client.post(url).json(&req_body).send().await?;
 
             let status = resp.status();
             let text_body = resp.text().await?;
