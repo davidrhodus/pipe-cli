@@ -2126,6 +2126,8 @@ pub async fn run_cli() -> Result<()> {
     // Initialize service discovery cache
     let service_cache = Arc::new(ServiceDiscoveryCache::new(base_url.to_string()));
 
+    // Version check completely disabled - nobody wants to see this
+    /*
     // Only check version for certain commands
     let should_check_version = matches!(
         cli.command,
@@ -2152,7 +2154,10 @@ pub async fn run_cli() -> Result<()> {
             | Commands::ListUploads
             | Commands::ExtendStorage { .. }
     );
+    */
 
+    // Version check disabled - nobody wants to see this
+    /*
     if should_check_version {
         println!("Starting version check...");
         if let Err(e) = check_version(&client, base_url).await {
@@ -2161,6 +2166,7 @@ pub async fn run_cli() -> Result<()> {
             println!("Version check completed successfully.");
         }
     }
+    */
 
     match cli.command {
         Commands::NewUser { username } => {
