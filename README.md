@@ -120,7 +120,7 @@ pipe upload-directory /large/dataset --skip-uploaded
 
 ```bash
 # Use a different endpoint (default is https://us-west-00-firestarter.pipenetwork.com)
-pipe upload-file data.csv mydata --api http://localhost:3333
+pipe upload-file data.csv mydata --api https://us-east-00-firestarter.pipenetwork.com
 ```
 
 ### List User Files
