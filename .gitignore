@@ -53,4 +53,8 @@ credentials.json
 # Local notes and scripts
 *.local.md
 local_*
-*.sh 
+*.sh
+
+# Markdown files (except README.md)
+*.md
+!README.md 
