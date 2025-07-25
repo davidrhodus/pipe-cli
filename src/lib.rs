@@ -862,6 +862,7 @@ async fn ensure_valid_token(
 }
 
 // Build a request with JWT auth header if available, otherwise use query params
+#[allow(dead_code)]
 fn build_authenticated_request(
     method: reqwest::Method,
     url: String,
@@ -974,6 +975,7 @@ pub fn append_to_upload_log(
     Ok(())
 }
 
+#[allow(dead_code)]
 async fn check_version(client: &Client, base_url: &str) -> Result<()> {
     const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -1019,6 +1021,7 @@ async fn check_version(client: &Client, base_url: &str) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 async fn improved_download_file(
     client: &Client,
     base_url: &str,
@@ -1128,6 +1131,7 @@ async fn improved_download_file_with_auth(
     Ok(())
 }
 
+#[allow(dead_code)]
 async fn download_with_progress(
     client: &Client,
     url: &str,

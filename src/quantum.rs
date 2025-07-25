@@ -14,9 +14,11 @@ use zeroize::Zeroize;
 use crate::encryption::{decrypt_data, encrypt_data, EncryptionKey};
 
 /// Size of the shared secret from Kyber
+#[allow(dead_code)]
 const KYBER_SHARED_SECRET_SIZE: usize = 32;
 
 /// Encrypt data using Kyber (post-quantum KEM) + AES-256-GCM
+#[allow(dead_code)]
 pub fn encrypt_with_kyber(data: &[u8], recipient_public_key: &[u8]) -> Result<Vec<u8>> {
     // Parse the public key
     let public_key = kyber1024::PublicKey::from_bytes(recipient_public_key)
@@ -53,6 +55,7 @@ pub fn encrypt_with_kyber(data: &[u8], recipient_public_key: &[u8]) -> Result<Ve
 }
 
 /// Decrypt data using Kyber (post-quantum KEM) + AES-256-GCM
+#[allow(dead_code)]
 pub fn decrypt_with_kyber(encrypted_data: &[u8], recipient_secret_key: &[u8]) -> Result<Vec<u8>> {
     if encrypted_data.len() < 4 {
         return Err(anyhow!("Invalid encrypted data: too short"));
@@ -129,6 +132,7 @@ pub fn verify_dilithium_signature(
 }
 
 /// Hybrid encryption: Kyber + AES with streaming support
+#[allow(dead_code)]
 pub async fn encrypt_file_with_kyber<R: Read, W: Write>(
     reader: R,
     mut writer: W,
@@ -180,6 +184,7 @@ pub async fn encrypt_file_with_kyber<R: Read, W: Write>(
 }
 
 /// Hybrid decryption: Kyber + AES with streaming support  
+#[allow(dead_code)]
 pub async fn decrypt_file_with_kyber<R: Read, W: Write>(
     mut reader: R,
     writer: W,
@@ -243,6 +248,7 @@ pub async fn decrypt_file_with_kyber<R: Read, W: Write>(
 
 /// Container for signed data
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct SignedData {
     pub data: Vec<u8>,
     pub signature: Vec<u8>,
@@ -250,6 +256,7 @@ pub struct SignedData {
 }
 
 /// Sign and encrypt data (sign-then-encrypt)
+#[allow(dead_code)]
 pub fn sign_and_encrypt(
     data: &[u8],
     signing_secret_key: &[u8],
@@ -273,6 +280,7 @@ pub fn sign_and_encrypt(
 }
 
 /// Decrypt and verify signed data
+#[allow(dead_code)]
 pub fn decrypt_and_verify(
     encrypted_data: &[u8],
     recipient_kyber_secret_key: &[u8],
