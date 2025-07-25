@@ -551,4 +551,131 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
+
+    #[test]
+    fn test_get_key_material_aes() {
+        let mut keyring = Keyring::new();
+        
+        // Generate an AES key
+        let key_name = keyring.generate_aes_key(
+            Some("test_material_key".to_string()),
+            Some("Test key for get_key_material".to_string())
+        ).unwrap();
+        
+        // Get key material with correct password
+        let material = keyring.get_key_material(&key_name, "keyring-protection").unwrap();
+        
+        // Verify we got the symmetric key
+        assert!(material.symmetric_key.is_some());
+        assert_eq!(material.symmetric_key.as_ref().unwrap().len(), 32);
+        assert!(material.private_key.is_none());
+        assert!(material.public_key.is_none());
+        
+        // Verify usage stats were updated
+        let key = keyring.get_key(&key_name).unwrap();
+        assert_eq!(key.metadata.usage_count, 1);
+        assert!(key.metadata.last_used.is_some());
+    }
+
+    #[test]
+    fn test_get_key_material_wrong_password() {
+        let mut keyring = Keyring::new();
+        
+        // Generate a key
+        let key_name = keyring.generate_aes_key(
+            Some("test_wrong_pass".to_string()),
+            None
+        ).unwrap();
+        
+        // Try to get key material with wrong password
+        let result = keyring.get_key_material(&key_name, "wrong-password");
+        
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_get_key_material_dilithium() {
+        let mut keyring = Keyring::new();
+        
+        // Generate a Dilithium signing key
+        let key_name = keyring.generate_dilithium_keypair(
+            Some("test_signing_material".to_string()),
+            Some("Test Dilithium key material".to_string())
+        ).unwrap();
+        
+        // Get key material
+        let material = keyring.get_key_material(&key_name, "keyring-protection").unwrap();
+        
+        // Verify we got the private and public keys
+        assert!(material.symmetric_key.is_none());
+        assert!(material.private_key.is_some());
+        assert!(material.public_key.is_some());
+        
+        // The private key for Dilithium5 should be 4896 bytes
+        assert_eq!(material.private_key.as_ref().unwrap().len(), 4896);
+    }
+
+    #[test]
+    fn test_get_key_material_kyber() {
+        let mut keyring = Keyring::new();
+        
+        // Generate a Kyber encryption key
+        let key_name = keyring.generate_kyber_keypair(
+            Some("test_kyber_material".to_string()),
+            Some("Test Kyber key material".to_string())
+        ).unwrap();
+        
+        // Get key material
+        let material = keyring.get_key_material(&key_name, "keyring-protection").unwrap();
+        
+        // Verify we got the private and public keys
+        assert!(material.symmetric_key.is_none());
+        assert!(material.private_key.is_some());
+        assert!(material.public_key.is_some());
+        
+        // The private key for Kyber1024 should be 3168 bytes
+        assert_eq!(material.private_key.as_ref().unwrap().len(), 3168);
+    }
+
+    #[test] 
+    fn test_sign_file_workflow() {
+        use crate::quantum;
+        
+        let _temp_dir = TempDir::new().unwrap();
+        let mut keyring = Keyring::new();
+        
+        // Generate signing key
+        let key_name = keyring.generate_dilithium_keypair(
+            Some("workflow_sign_key".to_string()),
+            None
+        ).unwrap();
+        
+        // Create test data
+        let test_data = b"Important document to sign";
+        
+        // Get key material (simulating what sign-file command does)
+        let key_material = keyring.get_key_material(&key_name, "keyring-protection").unwrap();
+        
+        // Sign the data
+        let signature = quantum::sign_with_dilithium(
+            test_data,
+            key_material.private_key.as_ref().unwrap()
+        ).unwrap();
+        
+        // Verify signature is created
+        assert!(!signature.is_empty());
+        
+        // Get public key for verification
+        let stored_key = keyring.get_key(&key_name).unwrap();
+        let public_key = stored_key.public_key.as_ref().unwrap();
+        
+        // Verify the signature
+        let is_valid = quantum::verify_dilithium_signature(
+            test_data,
+            &signature,
+            public_key
+        ).unwrap();
+        
+        assert!(is_valid);
+    }
 }
