@@ -1252,7 +1252,7 @@ async fn upload_file_with_auth(
     }
 
     let wrapped_stream = ProgressStream {
-        inner: InnerReaderStream::with_capacity(f, 64 * 1024),
+        inner: InnerReaderStream::with_capacity(f, 1024 * 1024), // 1MB buffer for better throughput
         progress: progress.clone(),
         bytes_uploaded: 0,
     };
@@ -1361,7 +1361,7 @@ async fn upload_file_priority(
     }
 
     let wrapped_stream = ProgressStream {
-        inner: InnerReaderStream::with_capacity(f, 64 * 1024),
+        inner: InnerReaderStream::with_capacity(f, 1024 * 1024), // 1MB buffer for better throughput
         progress: progress.clone(),
         bytes_uploaded: 0,
     };
@@ -1458,7 +1458,7 @@ async fn upload_file_priority_with_auth(
     }
 
     let wrapped_stream = ProgressStream {
-        inner: InnerReaderStream::with_capacity(f, 64 * 1024),
+        inner: InnerReaderStream::with_capacity(f, 1024 * 1024), // 1MB buffer for better throughput
         progress: progress.clone(),
         bytes_uploaded: 0,
     };
@@ -1804,7 +1804,7 @@ async fn upload_file_with_shared_progress(
     }
 
     let wrapped_stream = ProgressStream {
-        inner: InnerReaderStream::with_capacity(f, 64 * 1024),
+        inner: InnerReaderStream::with_capacity(f, 1024 * 1024), // 1MB buffer for better throughput
         progress: progress.clone(),
         bytes_uploaded: 0,
         shared_progress: shared_progress.clone(),
@@ -1968,7 +1968,7 @@ async fn upload_file_priority_with_shared_progress(
     }
 
     let wrapped_stream = ProgressStream {
-        inner: InnerReaderStream::with_capacity(f, 64 * 1024),
+        inner: InnerReaderStream::with_capacity(f, 1024 * 1024), // 1MB buffer for better throughput
         progress: progress.clone(),
         bytes_uploaded: 0,
         shared_progress: shared_progress.clone(),
@@ -2097,7 +2097,7 @@ pub async fn run_cli() -> Result<()> {
     let client = Client::builder()
         .pool_max_idle_per_host(100) // Keep more connections alive
         .pool_idle_timeout(std::time::Duration::from_secs(90)) // Keep connections alive longer
-        .timeout(std::time::Duration::from_secs(1800)) // 30 minute timeout for large files
+        .timeout(std::time::Duration::from_secs(7200)) // 2 hour timeout for very large files (95GB+)
         .build()?;
 
     let base_url = cli.api.trim_end_matches('/');
@@ -2683,12 +2683,7 @@ pub async fn run_cli() -> Result<()> {
                 }
                 Err(e) => {
                     eprintln!("Upload failed for {} => {}", file_path, e);
-                    append_to_upload_log(
-                        &file_path,
-                        &file_name,
-                        "FAIL",
-                        &format!("Non-priority upload error: {}", e),
-                    )?;
+                    // Don't log failures to the upload list
                     return Err(e);
                 }
             }
@@ -3648,12 +3643,7 @@ pub async fn run_cli() -> Result<()> {
                             *failed += 1;
 
                             eprintln!("Failed to upload {}: {}", rel_path, e);
-                            let _ = append_to_upload_log(
-                                &path.display().to_string(),
-                                &rel_path,
-                                "FAIL",
-                                &format!("Directory upload error: {}", e),
-                            );
+                            // Don't log failures to the upload list
                         }
                     }
                 });
@@ -3992,12 +3982,7 @@ pub async fn run_cli() -> Result<()> {
                             *failed += 1;
 
                             eprintln!("Failed priority upload {}: {}", rel_path, e);
-                            let _ = append_to_upload_log(
-                                &path.display().to_string(),
-                                &rel_path,
-                                "PRIORITY FAIL",
-                                &format!("Priority directory upload error: {}", e),
-                            );
+                            // Don't log failures to the upload list
                         }
                     }
                 });
@@ -4169,12 +4154,7 @@ pub async fn run_cli() -> Result<()> {
                 }
                 Err(e) => {
                     eprintln!("Priority upload failed for {} => {}", file_path, e);
-                    append_to_upload_log(
-                        &file_path,
-                        &file_name,
-                        "PRIORITY FAIL",
-                        &format!("Priority single upload error: {}", e),
-                    )?;
+                    // Don't log failures to the upload list
                     return Err(e);
                 }
             }
