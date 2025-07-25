@@ -101,7 +101,7 @@ Configuration is stored in `~/.pipe-cli.json`:
 {
   "user_id": "your-user-id",
   "user_app_key": "your-app-key",
-  "api_endpoints": ["https://api1.pipe.com", "https://api2.pipe.com"],
+  "api_endpoints": ["https:/us-west-00-firestarter.pipenetwork.com", "https://us-east-00-firestarter.pipenetwork.com"],
   "jwt_token": "your-jwt-token"
 }
 ```
