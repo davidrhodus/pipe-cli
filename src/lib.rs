@@ -1092,41 +1092,31 @@ async fn improved_download_file_with_auth(
         ));
     }
 
-    // Check content type to determine if we need to decode
-    let is_base64 = resp.headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .map(|ct| ct.contains("text/plain") || ct.contains("application/octet-stream"))
-        .unwrap_or(true); // Default to true for safety
-
     // Get the full response body
     let body_bytes = resp.bytes().await?;
-    progress.set_length(body_bytes.len() as u64);
     
-    // Try to decode as Base64 first if needed
-    let final_bytes = if is_base64 {
-        // Try to parse as text and decode Base64
-        match std::str::from_utf8(&body_bytes) {
-            Ok(text_body) => {
-                // Try Base64 decode
-                match general_purpose::STANDARD.decode(text_body.trim()) {
-                    Ok(decoded) => {
-                        progress.set_length(decoded.len() as u64);
-                        decoded
-                    }
-                    Err(_) => {
-                        // Not Base64, use original bytes
-                        body_bytes.to_vec()
-                    }
+    // The pipe-store server always returns base64-encoded content from the /download endpoint
+    // So we need to decode it
+    let final_bytes = match std::str::from_utf8(&body_bytes) {
+        Ok(text_body) => {
+            // Try Base64 decode
+            match general_purpose::STANDARD.decode(text_body.trim()) {
+                Ok(decoded) => {
+                    progress.set_length(decoded.len() as u64);
+                    decoded
+                }
+                Err(e) => {
+                    // If base64 decode fails, log warning and use original bytes
+                    eprintln!("Warning: Base64 decode failed: {}. Using raw response.", e);
+                    body_bytes.to_vec()
                 }
             }
-            Err(_) => {
-                // Not valid UTF-8, use original bytes
-                body_bytes.to_vec()
-            }
         }
-    } else {
-        body_bytes.to_vec()
+        Err(_) => {
+            // Not valid UTF-8, so can't be base64 - use original bytes
+            eprintln!("Warning: Response is not valid UTF-8, cannot be base64. Using raw response.");
+            body_bytes.to_vec()
+        }
     };
 
     // Write the decoded content
