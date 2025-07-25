@@ -291,7 +291,7 @@ impl Keyring {
         let decrypted = crate::encryption::decrypt_data(
             &stored_key.encrypted_key,
             &protection_key,
-            &[0u8; 12], // We need to store nonce with the key
+            &stored_key.nonce,
         )?;
 
         // Update usage stats
