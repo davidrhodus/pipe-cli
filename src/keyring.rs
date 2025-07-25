@@ -49,10 +49,17 @@ pub struct StoredKey {
     pub algorithm: KeyAlgorithm,
     pub encrypted_key: Vec<u8>,
     pub salt: [u8; 32],
+    #[serde(default = "default_nonce")]
+    pub nonce: [u8; 12], // Required for AES-GCM decryption
     pub metadata: KeyMetadata,
 
     // For post-quantum keys
     pub public_key: Option<Vec<u8>>,
+}
+
+// Default nonce for backward compatibility (existing keys won't have this field)
+fn default_nonce() -> [u8; 12] {
+    [0u8; 12]
 }
 
 /// In-memory key data (zeroized on drop)
@@ -149,14 +156,15 @@ impl Keyring {
         // Encrypt the key with a derived key (for now, we'll use a fixed password)
         // In production, this should use the master password or system keychain
         let protection_key = derive_key_from_password("keyring-protection", &salt)?;
-        let encrypted = crate::encryption::encrypt_data(&key, &protection_key)?;
+        let (encrypted_key, nonce) = crate::encryption::encrypt_data(&key, &protection_key)?;
 
         let stored_key = StoredKey {
             id: key_id.clone(),
             name: name.clone(),
             algorithm: KeyAlgorithm::Aes256,
-            encrypted_key: encrypted.0,
+            encrypted_key,
             salt,
+            nonce,
             metadata: KeyMetadata {
                 created_at: Utc::now(),
                 last_used: None,
@@ -190,14 +198,15 @@ impl Keyring {
 
         // Encrypt the secret key
         let protection_key = derive_key_from_password("keyring-protection", &salt)?;
-        let encrypted = crate::encryption::encrypt_data(secret_key.as_bytes(), &protection_key)?;
+        let (encrypted_key, nonce) = crate::encryption::encrypt_data(secret_key.as_bytes(), &protection_key)?;
 
         let stored_key = StoredKey {
             id: key_id.clone(),
             name: name.clone(),
             algorithm: KeyAlgorithm::Kyber1024,
-            encrypted_key: encrypted.0,
+            encrypted_key,
             salt,
+            nonce,
             metadata: KeyMetadata {
                 created_at: Utc::now(),
                 last_used: None,
@@ -228,14 +237,15 @@ impl Keyring {
 
         // Encrypt the secret key
         let protection_key = derive_key_from_password("keyring-protection", &salt)?;
-        let encrypted = crate::encryption::encrypt_data(secret_key.as_bytes(), &protection_key)?;
+        let (encrypted_key, nonce) = crate::encryption::encrypt_data(secret_key.as_bytes(), &protection_key)?;
 
         let stored_key = StoredKey {
             id: key_id.clone(),
             name: name.clone(),
             algorithm: KeyAlgorithm::Dilithium5,
-            encrypted_key: encrypted.0,
+            encrypted_key,
             salt,
+            nonce,
             metadata: KeyMetadata {
                 created_at: Utc::now(),
                 last_used: None,
@@ -335,7 +345,7 @@ pub fn export_key(
     // First decrypt with keyring password
     let keyring_protection_key = derive_key_from_password("keyring-protection", &key.salt)?;
     let decrypted =
-        crate::encryption::decrypt_data(&key.encrypted_key, &keyring_protection_key, &[0u8; 12])?;
+        crate::encryption::decrypt_data(&key.encrypted_key, &keyring_protection_key, &key.nonce)?;
 
     // Then re-encrypt with export password
     let (encrypted, nonce) = crate::encryption::encrypt_data(&decrypted, &export_protection_key)?;
@@ -374,4 +384,171 @@ pub fn export_key(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_aes_key_generation_and_export() {
+        // Create a temporary directory for the keyring
+        let temp_dir = TempDir::new().unwrap();
+        let keyring_path = temp_dir.path().join("test_keyring.json");
+        
+        // Create a new keyring
+        let mut keyring = Keyring::new();
+        
+        // Generate an AES key
+        let key_name = keyring.generate_aes_key(
+            Some("test_aes_key".to_string()),
+            Some("Test AES key for export".to_string())
+        ).unwrap();
+        
+        // Save the keyring
+        keyring.save_to_file(&keyring_path).unwrap();
+        
+        // Load the keyring again
+        let loaded_keyring = Keyring::load_from_file(&keyring_path).unwrap();
+        
+        // Export the key
+        let export_path = temp_dir.path().join("exported_key.json");
+        let export_password = "test_export_password";
+        
+        export_key(&loaded_keyring, &key_name, &export_path, export_password).unwrap();
+        
+        // Verify the exported file exists
+        assert!(export_path.exists());
+        
+        // Read and parse the exported key
+        let exported_content = fs::read_to_string(&export_path).unwrap();
+        let exported_json: serde_json::Value = serde_json::from_str(&exported_content).unwrap();
+        
+        // Verify the exported key has the required fields
+        assert_eq!(exported_json["version"], 1);
+        assert_eq!(exported_json["algorithm"], "aes256");
+        assert!(exported_json["encrypted_key"].is_array());
+        assert!(exported_json["salt"].is_array());
+        assert!(exported_json["nonce"].is_array());
+    }
+
+    #[test]
+    fn test_kyber_key_generation_and_export() {
+        let temp_dir = TempDir::new().unwrap();
+        let keyring_path = temp_dir.path().join("test_keyring.json");
+        
+        let mut keyring = Keyring::new();
+        
+        // Generate a Kyber keypair
+        let key_name = keyring.generate_kyber_keypair(
+            Some("test_kyber_key".to_string()),
+            Some("Test Kyber key for export".to_string())
+        ).unwrap();
+        
+        keyring.save_to_file(&keyring_path).unwrap();
+        
+        let loaded_keyring = Keyring::load_from_file(&keyring_path).unwrap();
+        
+        // Export the key
+        let export_path = temp_dir.path().join("exported_kyber_key.json");
+        let export_password = "test_kyber_export_password";
+        
+        export_key(&loaded_keyring, &key_name, &export_path, export_password).unwrap();
+        
+        // Verify the exported file exists and has public key
+        assert!(export_path.exists());
+        
+        let exported_content = fs::read_to_string(&export_path).unwrap();
+        let exported_json: serde_json::Value = serde_json::from_str(&exported_content).unwrap();
+        
+        assert_eq!(exported_json["algorithm"], "kyber1024");
+        assert!(exported_json["public_key"].is_array());
+    }
+
+    #[test]
+    fn test_dilithium_key_generation_and_export() {
+        let temp_dir = TempDir::new().unwrap();
+        let keyring_path = temp_dir.path().join("test_keyring.json");
+        
+        let mut keyring = Keyring::new();
+        
+        // Generate a Dilithium keypair
+        let key_name = keyring.generate_dilithium_keypair(
+            Some("test_dilithium_key".to_string()),
+            Some("Test Dilithium key for export".to_string())
+        ).unwrap();
+        
+        keyring.save_to_file(&keyring_path).unwrap();
+        
+        let loaded_keyring = Keyring::load_from_file(&keyring_path).unwrap();
+        
+        // Export the key
+        let export_path = temp_dir.path().join("exported_dilithium_key.json");
+        let export_password = "test_dilithium_export_password";
+        
+        export_key(&loaded_keyring, &key_name, &export_path, export_password).unwrap();
+        
+        // Verify the exported file exists and has public key
+        assert!(export_path.exists());
+        
+        let exported_content = fs::read_to_string(&export_path).unwrap();
+        let exported_json: serde_json::Value = serde_json::from_str(&exported_content).unwrap();
+        
+        assert_eq!(exported_json["algorithm"], "dilithium5");
+        assert!(exported_json["public_key"].is_array());
+    }
+
+    #[test]
+    fn test_key_export_with_different_passwords() {
+        let temp_dir = TempDir::new().unwrap();
+        let keyring_path = temp_dir.path().join("test_keyring.json");
+        
+        let mut keyring = Keyring::new();
+        
+        // Generate a key
+        let key_name = keyring.generate_aes_key(
+            Some("test_key".to_string()),
+            None
+        ).unwrap();
+        
+        keyring.save_to_file(&keyring_path).unwrap();
+        
+        let loaded_keyring = Keyring::load_from_file(&keyring_path).unwrap();
+        
+        // Export with first password
+        let export_path1 = temp_dir.path().join("export1.json");
+        export_key(&loaded_keyring, &key_name, &export_path1, "password1").unwrap();
+        
+        // Export with second password
+        let export_path2 = temp_dir.path().join("export2.json");
+        export_key(&loaded_keyring, &key_name, &export_path2, "password2").unwrap();
+        
+        // Read both exports
+        let export1 = fs::read_to_string(&export_path1).unwrap();
+        let export2 = fs::read_to_string(&export_path2).unwrap();
+        
+        let json1: serde_json::Value = serde_json::from_str(&export1).unwrap();
+        let json2: serde_json::Value = serde_json::from_str(&export2).unwrap();
+        
+        // Encrypted keys should be different (different passwords)
+        assert_ne!(json1["encrypted_key"], json2["encrypted_key"]);
+        
+        // But algorithm and metadata should be the same
+        assert_eq!(json1["algorithm"], json2["algorithm"]);
+        assert_eq!(json1["metadata"]["description"], json2["metadata"]["description"]);
+    }
+
+    #[test]
+    fn test_export_nonexistent_key() {
+        let temp_dir = TempDir::new().unwrap();
+        let keyring = Keyring::new();
+        let export_path = temp_dir.path().join("export.json");
+        
+        // Try to export a key that doesn't exist
+        let result = export_key(&keyring, "nonexistent_key", &export_path, "password");
+        
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
 }
