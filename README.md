@@ -159,7 +159,7 @@ Confirm encryption password: ****
 
 ## Configuration
 
-Configuration is stored in `~/.pipe-cli.json`:
+Configuration is stored in `~/.pipe-cli.json` by default:
 
 ```json
 {
@@ -169,6 +169,69 @@ Configuration is stored in `~/.pipe-cli.json`:
   "jwt_token": "your-jwt-token"
 }
 ```
+
+### Multiple Accounts Support
+
+pipe-cli now supports managing multiple accounts on the same machine through custom configuration files.
+
+#### Using Command Line Option
+
+Specify a custom config file with `--config`:
+
+```bash
+# Use work account
+pipe --config ~/.pipe-cli-work.json upload-file report.pdf
+
+# Use personal account
+pipe --config ~/.pipe-cli-personal.json upload-file photo.jpg
+```
+
+#### Using Environment Variable
+
+Set the `PIPE_CLI_CONFIG` environment variable:
+
+```bash
+# Set config for current session
+export PIPE_CLI_CONFIG=~/.pipe-cli-work.json
+pipe upload-file report.pdf
+
+# Or for a single command
+PIPE_CLI_CONFIG=~/.pipe-cli-personal.json pipe upload-file photo.jpg
+```
+
+#### Using Shell Aliases (Recommended)
+
+Create convenient aliases in your `~/.bashrc` or `~/.zshrc`:
+
+```bash
+alias pipe-work='pipe --config ~/.pipe-cli-work.json'
+alias pipe-personal='pipe --config ~/.pipe-cli-personal.json'
+
+# Usage
+pipe-work upload-file report.pdf
+pipe-personal download-file vacation.jpg
+```
+
+#### Setting Up Multiple Accounts
+
+1. Create separate accounts:
+```bash
+pipe --config ~/.pipe-cli-work.json new-user
+# Enter work username...
+
+pipe --config ~/.pipe-cli-personal.json new-user
+# Enter personal username...
+```
+
+2. Each account has its own isolated configuration
+3. Credentials are never mixed between accounts
+
+#### Priority Order
+
+Configuration file location is determined in this order:
+1. `--config` command line option (highest priority)
+2. `PIPE_CLI_CONFIG` environment variable
+3. Default `~/.pipe-cli.json` (lowest priority)
 
 ## Advanced Features
 
