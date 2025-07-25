@@ -19,6 +19,7 @@ serde_json = "1.0"
 tokio = { version = "1.43.0", features = ["rt-multi-thread", "macros", "fs", "full"] }
 tokio-util = { version = "0.7", features = ["io"] }
 walkdir = "2.3.4"
+tempfile = "3.8"
 
 # Encryption dependencies
 aes-gcm = "0.10"

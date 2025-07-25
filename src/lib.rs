@@ -28,6 +28,9 @@ mod keyring;
 mod quantum;
 mod quantum_keyring;
 
+#[cfg(test)]
+mod quantum_integration_test;
+
 pub const MAX_RETRIES: u32 = 5;
 pub const INITIAL_RETRY_DELAY_MS: u64 = 1000;
 pub const MAX_RETRY_DELAY_MS: u64 = 10000;
