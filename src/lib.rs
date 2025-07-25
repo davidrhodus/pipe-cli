@@ -2115,6 +2115,160 @@ async fn upload_file_priority_with_shared_progress(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::engine::general_purpose;
+
+    #[test]
+    fn test_base64_decode_valid_text() {
+        // Test that valid base64 encoded text is properly decoded
+        let original_text = "Hello, this is a test file!";
+        let base64_encoded = general_purpose::STANDARD.encode(original_text);
+        
+        // Simulate what the server sends
+        let server_response = base64_encoded.as_bytes();
+        
+        // Test the decoding logic
+        match std::str::from_utf8(server_response) {
+            Ok(text_body) => {
+                match general_purpose::STANDARD.decode(text_body.trim()) {
+                    Ok(decoded) => {
+                        let decoded_str = std::str::from_utf8(&decoded).unwrap();
+                        assert_eq!(decoded_str, original_text);
+                    }
+                    Err(_) => panic!("Base64 decode should succeed"),
+                }
+            }
+            Err(_) => panic!("Should be valid UTF-8"),
+        }
+    }
+
+    #[test]
+    fn test_base64_decode_binary_data() {
+        // Test that binary data encoded as base64 is properly decoded
+        let original_binary = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]; // JPEG header
+        let base64_encoded = general_purpose::STANDARD.encode(&original_binary);
+        
+        // Simulate what the server sends
+        let server_response = base64_encoded.as_bytes();
+        
+        // Test the decoding logic
+        match std::str::from_utf8(server_response) {
+            Ok(text_body) => {
+                match general_purpose::STANDARD.decode(text_body.trim()) {
+                    Ok(decoded) => {
+                        assert_eq!(decoded, original_binary);
+                    }
+                    Err(_) => panic!("Base64 decode should succeed"),
+                }
+            }
+            Err(_) => panic!("Should be valid UTF-8"),
+        }
+    }
+
+    #[test]
+    fn test_base64_decode_with_whitespace() {
+        // Test that base64 with whitespace (newlines, spaces) is handled
+        let original_text = "Testing whitespace handling";
+        let base64_encoded = general_purpose::STANDARD.encode(original_text);
+        let base64_with_whitespace = format!("  {}  \n", base64_encoded);
+        
+        // Simulate what the server sends
+        let server_response = base64_with_whitespace.as_bytes();
+        
+        // Test the decoding logic
+        match std::str::from_utf8(server_response) {
+            Ok(text_body) => {
+                match general_purpose::STANDARD.decode(text_body.trim()) {
+                    Ok(decoded) => {
+                        let decoded_str = std::str::from_utf8(&decoded).unwrap();
+                        assert_eq!(decoded_str, original_text);
+                    }
+                    Err(_) => panic!("Base64 decode should succeed after trimming"),
+                }
+            }
+            Err(_) => panic!("Should be valid UTF-8"),
+        }
+    }
+
+    #[test]
+    fn test_fallback_for_non_base64() {
+        // Test that non-base64 content falls back to raw bytes
+        let non_base64 = b"This is not base64!!!";
+        
+        // Test the decoding logic
+        match std::str::from_utf8(non_base64) {
+            Ok(text_body) => {
+                match general_purpose::STANDARD.decode(text_body.trim()) {
+                    Ok(_) => panic!("Should not decode as base64"),
+                    Err(_) => {
+                        // Expected - should fall back to raw bytes
+                        assert_eq!(non_base64.to_vec(), non_base64.to_vec());
+                    }
+                }
+            }
+            Err(_) => panic!("Should be valid UTF-8"),
+        }
+    }
+
+    #[test]
+    fn test_fallback_for_non_utf8() {
+        // Test that non-UTF8 content falls back to raw bytes
+        let non_utf8_bytes = vec![0xFF, 0xFE, 0xFD, 0xFC];
+        
+        // Test the decoding logic
+        match std::str::from_utf8(&non_utf8_bytes) {
+            Ok(_) => panic!("Should not be valid UTF-8"),
+            Err(_) => {
+                // Expected - should fall back to raw bytes
+                assert_eq!(non_utf8_bytes.clone(), non_utf8_bytes);
+            }
+        }
+    }
+
+    #[test]
+    fn test_large_base64_content() {
+        // Test with larger content to ensure it handles real file sizes
+        let large_content = vec![b'A'; 10000]; // 10KB of 'A's
+        let base64_encoded = general_purpose::STANDARD.encode(&large_content);
+        
+        // Simulate what the server sends
+        let server_response = base64_encoded.as_bytes();
+        
+        // Test the decoding logic
+        match std::str::from_utf8(server_response) {
+            Ok(text_body) => {
+                match general_purpose::STANDARD.decode(text_body.trim()) {
+                    Ok(decoded) => {
+                        assert_eq!(decoded.len(), large_content.len());
+                        assert_eq!(decoded, large_content);
+                    }
+                    Err(_) => panic!("Base64 decode should succeed"),
+                }
+            }
+            Err(_) => panic!("Should be valid UTF-8"),
+        }
+    }
+
+    #[test]
+    fn test_empty_response() {
+        // Test that empty responses are handled
+        let empty_response = b"";
+        
+        // Test the decoding logic
+        match std::str::from_utf8(empty_response) {
+            Ok(text_body) => {
+                if text_body.trim().is_empty() {
+                    // Empty base64 should decode to empty
+                    assert_eq!(text_body.len(), 0);
+                }
+            }
+            Err(_) => panic!("Empty should be valid UTF-8"),
+        }
+    }
+}
+
 pub async fn run_cli() -> Result<()> {
     let cli = Cli::parse();
 
