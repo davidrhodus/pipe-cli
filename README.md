@@ -6,6 +6,7 @@ A powerful command-line interface for interacting with the Pipe distributed stor
 
 - **Decentralized Storage**: Upload and download files to/from the Pipe network
 - **Client-Side Encryption**: AES-256-GCM encryption with password-based key derivation
+- **Quantum-Resistant Encryption**: Post-quantum cryptography using Kyber-1024 and Dilithium5
 - **Tiered Upload System**: Multiple upload tiers with different performance characteristics
 - **Directory Operations**: Upload entire directories with progress tracking
 - **Resumable Uploads**: Skip already uploaded files with `--skip-uploaded`
@@ -75,7 +76,7 @@ pipe upload-directory /sensitive/data --encrypt
 - **AES-256-GCM**: Military-grade encryption with authenticated encryption
 - **Password-Based**: Secure key derivation using Argon2id
 - **Key-Based**: Support for managed encryption keys
-- **Post-Quantum**: CRYSTALS-Kyber and Dilithium for quantum resistance
+- **Post-Quantum**: CRYSTALS-Kyber and Dilithium for quantum resistance (see Quantum Encryption section)
 - **Streaming**: Encrypts large files in chunks for memory efficiency
 - **Transparent**: Encrypted files are marked with `.enc` extension automatically
 - **Zero-Knowledge**: Your data is encrypted before leaving your device
@@ -99,6 +100,53 @@ pipe upload-directory /sensitive/data --encrypt
    - Salt for password-based key derivation
    - Nonce for AES-GCM encryption
 
+### Quantum-Resistant Encryption
+
+pipe-cli supports post-quantum cryptography to protect against future quantum computer attacks:
+
+```bash
+# Upload with quantum encryption
+pipe upload-file secret.pdf quantum-secret --quantum
+
+# Download quantum-encrypted file (auto-detected by .qenc extension)
+pipe download-file quantum-secret.qenc decrypted.pdf
+
+# Combine quantum + password encryption for maximum security
+pipe upload-file topsecret.doc ultra-secure --quantum --encrypt
+Enter encryption password: ****
+Confirm encryption password: ****
+```
+
+#### Quantum Features
+
+- **Kyber-1024 (ML-KEM)**: NIST-standardized quantum-resistant key encapsulation mechanism
+- **Dilithium5 (ML-DSA)**: NIST-standardized quantum-resistant digital signatures
+- **Sign-then-Encrypt**: Ensures both authenticity and confidentiality
+- **Key Management**: Quantum keys stored locally in `~/.pipe-cli/quantum-keys/`
+- **Automatic Detection**: Files with `.qenc` extension are automatically handled as quantum-encrypted
+- **Hybrid Encryption**: Can combine with password encryption for defense in depth
+
+#### How Quantum Encryption Works
+
+1. **Key Generation**: Generates two quantum-resistant keypairs:
+   - Kyber keypair for encryption/decryption
+   - Dilithium keypair for signing/verification
+
+2. **Signing**: Your data is signed with your Dilithium private key
+
+3. **Encryption**: The signed data is encrypted with the Kyber public key
+
+4. **Upload**: The quantum-encrypted file is uploaded with `.qenc` extension
+
+5. **Download & Verify**: During download, the signature is verified before decryption
+
+#### Security Considerations
+
+- **Overhead**: Quantum encryption adds ~8KB overhead (signatures + ciphertext)
+- **Key Size**: Quantum keys are ~100KB each (stored locally, never uploaded)
+- **Future-Proof**: Protects against both current and future quantum computer attacks
+- **Performance**: Slightly slower than classical encryption due to larger key sizes
+
 ## Storage Tiers
 
 | Tier | Upload Speed | Cost | Use Case |
@@ -111,7 +159,7 @@ pipe upload-directory /sensitive/data --encrypt
 
 ## Configuration
 
-Configuration is stored in `~/.pipe-cli.json`:
+Configuration is stored in `~/.pipe-cli.json` by default:
 
 ```json
 {
@@ -121,6 +169,69 @@ Configuration is stored in `~/.pipe-cli.json`:
   "jwt_token": "your-jwt-token"
 }
 ```
+
+### Multiple Accounts Support
+
+pipe-cli now supports managing multiple accounts on the same machine through custom configuration files.
+
+#### Using Command Line Option
+
+Specify a custom config file with `--config`:
+
+```bash
+# Use work account
+pipe --config ~/.pipe-cli-work.json upload-file report.pdf
+
+# Use personal account
+pipe --config ~/.pipe-cli-personal.json upload-file photo.jpg
+```
+
+#### Using Environment Variable
+
+Set the `PIPE_CLI_CONFIG` environment variable:
+
+```bash
+# Set config for current session
+export PIPE_CLI_CONFIG=~/.pipe-cli-work.json
+pipe upload-file report.pdf
+
+# Or for a single command
+PIPE_CLI_CONFIG=~/.pipe-cli-personal.json pipe upload-file photo.jpg
+```
+
+#### Using Shell Aliases (Recommended)
+
+Create convenient aliases in your `~/.bashrc` or `~/.zshrc`:
+
+```bash
+alias pipe-work='pipe --config ~/.pipe-cli-work.json'
+alias pipe-personal='pipe --config ~/.pipe-cli-personal.json'
+
+# Usage
+pipe-work upload-file report.pdf
+pipe-personal download-file vacation.jpg
+```
+
+#### Setting Up Multiple Accounts
+
+1. Create separate accounts:
+```bash
+pipe --config ~/.pipe-cli-work.json new-user
+# Enter work username...
+
+pipe --config ~/.pipe-cli-personal.json new-user
+# Enter personal username...
+```
+
+2. Each account has its own isolated configuration
+3. Credentials are never mixed between accounts
+
+#### Priority Order
+
+Configuration file location is determined in this order:
+1. `--config` command line option (highest priority)
+2. `PIPE_CLI_CONFIG` environment variable
+3. Default `~/.pipe-cli.json` (lowest priority)
 
 ## Advanced Features
 

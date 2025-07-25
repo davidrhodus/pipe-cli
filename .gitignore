@@ -21,9 +21,16 @@ Thumbs.db
 # Test and temporary files
 *.log
 *.tmp
-test_*
-*_test.*
-*.test
+test_*.txt
+test_*.json
+test_*.tmp
+*_test.txt
+*_test.json
+*_test.tmp
+*.test.tmp
+# But don't ignore Rust test modules
+!*_test.rs
+!test_*.rs
 
 # Environment and secrets
 .env
@@ -46,4 +53,8 @@ credentials.json
 # Local notes and scripts
 *.local.md
 local_*
-*.sh 
+*.sh
+
+# Markdown files (except README.md)
+*.md
+!README.md 
