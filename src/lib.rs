@@ -1044,7 +1044,14 @@ async fn improved_download_file_with_auth(
     file_name: &str,
     output_path: &str,
 ) -> Result<()> {
-    println!("Downloading '{}' to '{}'...", file_name, output_path);
+    // Handle directory case - append filename if output_path is a directory
+    let output_path = if Path::new(output_path).is_dir() {
+        Path::new(output_path).join(file_name).to_string_lossy().to_string()
+    } else {
+        output_path.to_string()
+    };
+    
+    println!("Downloading '{}' to '{}'...", file_name, &output_path);
 
     // Build the URL - NO CREDENTIALS IN URL (security fix)
     let url = format!("{}/download?file_name={}", base_url, file_name);
@@ -1085,22 +1092,46 @@ async fn improved_download_file_with_auth(
         ));
     }
 
-    let total_size = resp.content_length().unwrap_or(0);
-    progress.set_length(total_size);
+    // Check content type to determine if we need to decode
+    let is_base64 = resp.headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| ct.contains("text/plain") || ct.contains("application/octet-stream"))
+        .unwrap_or(true); // Default to true for safety
 
-    let file = tokio::fs::File::create(output_path).await?;
-    let mut writer = BufWriter::new(file);
-    let mut stream = resp.bytes_stream();
-    let mut downloaded: u64 = 0;
+    // Get the full response body
+    let body_bytes = resp.bytes().await?;
+    progress.set_length(body_bytes.len() as u64);
+    
+    // Try to decode as Base64 first if needed
+    let final_bytes = if is_base64 {
+        // Try to parse as text and decode Base64
+        match std::str::from_utf8(&body_bytes) {
+            Ok(text_body) => {
+                // Try Base64 decode
+                match general_purpose::STANDARD.decode(text_body.trim()) {
+                    Ok(decoded) => {
+                        progress.set_length(decoded.len() as u64);
+                        decoded
+                    }
+                    Err(_) => {
+                        // Not Base64, use original bytes
+                        body_bytes.to_vec()
+                    }
+                }
+            }
+            Err(_) => {
+                // Not valid UTF-8, use original bytes
+                body_bytes.to_vec()
+            }
+        }
+    } else {
+        body_bytes.to_vec()
+    };
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        writer.write_all(&chunk).await?;
-        downloaded += chunk.len() as u64;
-        progress.set_position(downloaded);
-    }
-
-    writer.flush().await?;
+    // Write the decoded content
+    tokio::fs::write(&output_path, &final_bytes).await?;
+    progress.set_position(final_bytes.len() as u64);
     progress.finish_with_message("Download completed");
 
     println!("File downloaded successfully to: {}", output_path);
