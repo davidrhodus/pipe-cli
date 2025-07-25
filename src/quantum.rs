@@ -350,3 +350,77 @@ pub fn decrypt_and_verify(
         signer_public_key,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_kyber_encryption_works() {
+        // Generate Kyber keypair
+        let (public_key, secret_key) = kyber1024::keypair();
+        
+        // Test data
+        let plaintext = b"Hello from the post-quantum future!";
+        
+        // Encrypt
+        let ciphertext = encrypt_with_kyber(plaintext, public_key.as_bytes())
+            .expect("Encryption should work");
+        
+        // Decrypt
+        let decrypted = decrypt_with_kyber(&ciphertext, secret_key.as_bytes())
+            .expect("Decryption should work");
+        
+        assert_eq!(plaintext.to_vec(), decrypted);
+    }
+
+    #[test]
+    fn test_dilithium_signatures_work() {
+        // Generate Dilithium keypair
+        let (public_key, secret_key) = dilithium5::keypair();
+        
+        // Test data
+        let message = b"Important quantum-resistant message";
+        
+        // Sign
+        let signature = sign_with_dilithium(message, secret_key.as_bytes())
+            .expect("Signing should work");
+        
+        // Verify
+        let valid = verify_dilithium_signature(message, &signature, public_key.as_bytes())
+            .expect("Verification should work");
+        
+        assert!(valid);
+        
+        // Test with wrong message
+        let wrong_message = b"Tampered message";
+        let invalid = verify_dilithium_signature(wrong_message, &signature, public_key.as_bytes())
+            .expect("Verification should work");
+        
+        assert!(!invalid);
+    }
+
+    #[test]
+    fn test_sign_and_encrypt_works() {
+        // Generate keypairs
+        let (signing_public, signing_secret) = dilithium5::keypair();
+        let (encryption_public, encryption_secret) = kyber1024::keypair();
+        
+        // Test data
+        let secret_data = b"Top secret quantum-resistant message";
+        
+        // Sign and encrypt
+        let encrypted = sign_and_encrypt(
+            secret_data,
+            signing_secret.as_bytes(),
+            signing_public.as_bytes(),
+            encryption_public.as_bytes()
+        ).expect("Sign and encrypt should work");
+        
+        // Decrypt and verify
+        let signed_data = decrypt_and_verify(&encrypted, encryption_secret.as_bytes())
+            .expect("Decrypt and verify should work");
+        
+        assert_eq!(secret_data.to_vec(), signed_data.data);
+    }
+}
