@@ -12,11 +12,11 @@ clap = { version = "4.4.0", features = ["derive"] }
 dirs = "5.0.1"
 futures-util = "0.3"
 indicatif = "0.17.0"
-reqwest = { version = "0.11", features = ["json", "stream"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
 rpassword = "7.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1.28.0", features = ["rt-multi-thread", "macros", "fs", "full"] }
+tokio = { version = "1.43.0", features = ["rt-multi-thread", "macros", "fs", "full"] }
 tokio-util = { version = "0.7", features = ["io"] }
 walkdir = "2.3.4"
 
@@ -31,7 +31,8 @@ uuid = { version = "1.6", features = ["v4", "serde"] }
 hex = "0.4"
 
 # Post-quantum cryptography
-pqcrypto = { version = "0.17", features = ["pqcrypto-kyber", "pqcrypto-dilithium"] }
+pqcrypto-mlkem = "0.1"
+pqcrypto-mldsa = "0.1" 
 pqcrypto-traits = "0.3"
 sha3 = "0.10"
 

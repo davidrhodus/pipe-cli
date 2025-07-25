@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
-use pqcrypto::kem::kyber1024;
-use pqcrypto::sign::dilithium5;
+use pqcrypto_mlkem::mlkem1024 as kyber1024;
+use pqcrypto_mldsa::mldsa87 as dilithium5;
 use pqcrypto_traits::kem::{
     Ciphertext, PublicKey as KemPublicKey, SecretKey as KemSecretKey, SharedSecret,
 };

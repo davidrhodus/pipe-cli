@@ -181,7 +181,7 @@ impl Keyring {
         name: Option<String>,
         description: Option<String>,
     ) -> Result<String> {
-        use pqcrypto::kem::kyber1024;
+        use pqcrypto_mlkem::mlkem1024 as kyber1024;
 
         let (public_key, secret_key) = kyber1024::keypair();
 
@@ -219,7 +219,7 @@ impl Keyring {
         name: Option<String>,
         description: Option<String>,
     ) -> Result<String> {
-        use pqcrypto::sign::dilithium5;
+        use pqcrypto_mldsa::mldsa87 as dilithium5;
 
         let (public_key, secret_key) = dilithium5::keypair();
 
