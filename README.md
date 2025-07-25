@@ -6,12 +6,14 @@ A powerful command-line interface for interacting with the Pipe distributed stor
 
 - **Decentralized Storage**: Upload and download files to/from the Pipe network
 - **Client-Side Encryption**: AES-256-GCM encryption with password-based key derivation
-- **Quantum-Resistant Encryption**: Post-quantum cryptography using Kyber-1024 and Dilithium5
+- **Quantum-Resistant Encryption**: Post-quantum cryptography using Kyber-1024 (ML-KEM) and Dilithium5 (ML-DSA)
 - **Tiered Upload System**: Multiple upload tiers with different performance characteristics
 - **Directory Operations**: Upload entire directories with progress tracking
 - **Resumable Uploads**: Skip already uploaded files with `--skip-uploaded`
 - **JWT Authentication**: Secure authentication with JWT tokens
 - **Service Discovery**: Automatic selection of optimal storage nodes
+- **Multiple Account Support**: Manage multiple accounts with custom config files
+- **Local Key Management**: Generate and manage encryption keys locally with built-in keyring
 
 ## Prerequisites
 To build make sure you have [Rust](https://www.rust-lang.org/tools/install) and required system packages installed :
@@ -300,38 +302,77 @@ Pipe-cli includes a secure keyring for managing encryption keys:
 
 ```bash
 # Generate an AES-256 key
-pipe keygen --name mydata --algorithm aes256
+pipe key-gen --name mydata --algorithm aes256
 
 # Generate a post-quantum Kyber key (for encryption)
-pipe keygen --name quantum-safe --algorithm kyber1024
+pipe key-gen --name quantum-safe --algorithm kyber1024
 
 # Generate a post-quantum Dilithium key (for signatures)
-pipe keygen --name signing-key --algorithm dilithium5
+pipe key-gen --name signing-key --algorithm dilithium5
 
 # List all keys
-pipe keylist
+pipe key-list
 
 # Export a key (password protected)
-pipe keyexport mydata mydata.key
+pipe key-export mydata mydata.key
 
 # Delete a key
-pipe keydelete old-key
+pipe key-delete old-key
 ```
+
+**Important Note**: The keyring uses a default password `keyring-protection` for internal encryption. When prompted for "keyring password" during operations like `key-export` or `sign-file`, use this password. Future versions will allow custom keyring passwords.
 
 ### Post-Quantum Cryptography
 
-Protect your data against future quantum computers:
+Protect your data against future quantum computers using NIST-standardized algorithms:
 
 ```bash
-# Upload with post-quantum encryption (requires Kyber key)
-pipe upload-file document.pdf qdoc --encrypt --key quantum-safe --quantum
+# Upload with quantum-resistant encryption
+# This generates quantum keys automatically and saves them locally
+pipe upload-file document.pdf qdoc --quantum
 
-# Sign a file with Dilithium
-pipe signfile document.pdf document.sig --key signing-key
+# Upload with both quantum and password encryption
+pipe upload-file sensitive.pdf sdoc --quantum --encrypt
+
+# Download quantum-encrypted files
+pipe download-file qdoc decrypted.pdf --quantum
+
+# Sign a file with Dilithium5 (ML-DSA)
+pipe sign-file document.pdf document.sig --key signing-key
 
 # Verify a signature
-pipe verifysignature document.pdf document.sig --public-key document.sig.pubkey
+pipe verify-signature document.pdf document.sig --public-key document.sig.pubkey
 ```
+
+**Quantum Encryption Details**:
+- Uses Kyber-1024 (ML-KEM) for key encapsulation
+- Uses Dilithium5 (ML-DSA) for digital signatures
+- Implements sign-then-encrypt pattern for authenticity and confidentiality
+- Quantum keys are automatically generated and stored locally
+- Files uploaded with `--quantum` have `.qenc` extension on the server
+
+## Troubleshooting
+
+### "File not found" Errors When Downloading
+
+If you get "File not found" errors:
+- For encrypted files: use the `--decrypt` flag (don't include `.enc` in the filename)
+- Check exact filename with `pipe list-uploads`
+- Ensure you're logged in as the file owner
+
+### Keyring Password Issues
+
+If key operations fail with "Decryption failed":
+- Use password `keyring-protection` when prompted for "keyring password"
+- Keys generated before v0.1.x may not work due to a bug (regenerate them)
+- For new installations, all key operations should work with the default password
+
+### Download Decoding Issues
+
+Downloads are automatically base64 decoded. If you encounter issues:
+- Ensure you're using the latest version
+- For binary files, decoding happens automatically
+- No manual base64 decoding is needed
 
 ## Security Notes
 
@@ -339,6 +380,18 @@ pipe verifysignature document.pdf document.sig --public-key document.sig.pubkey
 - **Use strong passwords**: Combine uppercase, lowercase, numbers, and symbols
 - **Backup your passwords**: Lost passwords mean lost data
 - **Local encryption**: All encryption happens on your device
+- **Quantum-safe options**: Use `--quantum` flag for future-proof encryption
+- **Key storage**: All keys are stored locally in an encrypted keyring
+
+## Recent Updates
+
+### v0.1.x
+- **Fixed**: Base64 decoding now happens automatically for all downloads
+- **Fixed**: Key export and signing operations (nonce storage bug resolved)
+- **Added**: Full quantum-resistant encryption with Kyber-1024 and Dilithium5
+- **Added**: Multiple account support via `--config` option
+- **Improved**: Better error messages for file not found errors
+- **Note**: Keys generated before this version may need to be regenerated
 
 ## License
 
