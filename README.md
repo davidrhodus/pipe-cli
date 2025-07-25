@@ -14,7 +14,23 @@ A powerful command-line interface for interacting with the Pipe distributed stor
 
 ## Installation
 
+### From GitHub
+
 ```bash
+# Clone the repository
+git clone https://github.com/PipeNetwork/pipe.git
+cd pipe
+
+# Install pipe-cli globally on your system
+cargo install --path .
+```
+
+### From Local Source
+
+If you already have the source code:
+
+```bash
+cd /path/to/pipe
 cargo install --path .
 ```
 
