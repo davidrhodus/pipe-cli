@@ -13,6 +13,23 @@ A powerful command-line interface for interacting with the Pipe distributed stor
 - **JWT Authentication**: Secure authentication with JWT tokens
 - **Service Discovery**: Automatic selection of optimal storage nodes
 
+## Prerequisites
+To build make sure you have [Rust](https://www.rust-lang.org/tools/install) and required system packages installed :
+
+```bash
+# install dependencies
+sudo apt update && sudo apt install -y \
+  build-essential \
+  pkg-config \
+  libssl-dev \
+  git \
+  curl
+
+# install rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+```
+
 ## Installation
 
 ### From GitHub
@@ -41,7 +58,7 @@ cargo install --path .
 
 ```bash
 # Create a new user
-pipe create-user
+pipe new-user <your_username>
 
 # Upload a file
 pipe upload-file photo.jpg my-photo
