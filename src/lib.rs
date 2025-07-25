@@ -26,6 +26,7 @@ use walkdir::WalkDir;
 mod encryption;
 mod keyring;
 mod quantum;
+mod quantum_keyring;
 
 pub const MAX_RETRIES: u32 = 5;
 pub const INITIAL_RETRY_DELAY_MS: u64 = 1000;
@@ -196,6 +197,8 @@ pub enum Commands {
         password: Option<String>,
         #[arg(long, help = "Use key from keyring or key file")]
         key: Option<String>,
+        #[arg(long, help = "Use post-quantum decryption (kyber)")]
+        quantum: bool,
     },
 
     /// Delete a file
@@ -1626,6 +1629,91 @@ struct DirectoryUploadProgress {
     progress_bar: Arc<ProgressBar>,
 }
 
+// Helper function to handle quantum-encrypted file download
+async fn download_file_with_quantum_decryption(
+    client: &Client,
+    base_url: &str,
+    creds: &SavedCredentials,
+    file_name: &str,
+    output_path: &str,
+    decrypt_password: bool,
+    password: Option<String>,
+) -> Result<()> {
+    use crate::quantum::decrypt_and_verify;
+    use crate::quantum_keyring::load_quantum_keypair;
+    
+    println!("🔐 Downloading quantum-encrypted file...");
+    
+    // Download the quantum-encrypted file
+    let temp_path = format!("{}.qenc.tmp", output_path);
+    improved_download_file_with_auth(client, base_url, creds, file_name, &temp_path).await?;
+    
+    // Read the downloaded file
+    let quantum_encrypted_data = std::fs::read(&temp_path)?;
+    println!("  Downloaded size: {} bytes", quantum_encrypted_data.len());
+    
+    // Determine the original filename (remove .qenc extension if present)
+    let original_filename = if file_name.ends_with(".qenc") {
+        &file_name[..file_name.len() - 5]
+    } else {
+        file_name
+    };
+    
+    // Load quantum keys
+    let quantum_keys = match load_quantum_keypair(original_filename) {
+        Ok(keys) => keys,
+        Err(e) => {
+            eprintln!("⚠️  Could not load quantum keys for {}: {}", original_filename, e);
+            eprintln!("    Make sure you have the quantum keys from when this file was uploaded.");
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(anyhow!("Quantum keys not found"));
+        }
+    };
+    
+    // Decrypt and verify using quantum crypto
+    println!("  Decrypting with quantum-resistant algorithms...");
+    let signed_data = decrypt_and_verify(
+        &quantum_encrypted_data,
+        &quantum_keys.kyber_secret,
+    )?;
+    
+    println!("  ✅ Signature verified");
+    println!("  Decrypted size: {} bytes", signed_data.data.len());
+    
+    // If password decryption is also needed
+    let final_data = if decrypt_password {
+        let password = match password {
+            Some(p) => p,
+            None => rpassword::prompt_password("Enter decryption password: ")?,
+        };
+        
+        // Extract nonce and encrypted data
+        if signed_data.data.len() < 12 {
+            return Err(anyhow!("Invalid encrypted data: too short"));
+        }
+        let (nonce_bytes, encrypted_data) = signed_data.data.split_at(12);
+        let mut nonce = [0u8; 12];
+        nonce.copy_from_slice(nonce_bytes);
+        
+        // Decrypt with password
+        // Use a fixed salt for quantum context
+        let quantum_salt = b"pipe-quantum-v1-salt-2024";
+        let decryption_key = crate::encryption::derive_key_from_password(&password, quantum_salt)?;
+        crate::encryption::decrypt_data(encrypted_data, &decryption_key, &nonce)?
+    } else {
+        signed_data.data
+    };
+    
+    // Write the final decrypted file
+    std::fs::write(output_path, &final_data)?;
+    
+    // Clean up temp file
+    let _ = std::fs::remove_file(&temp_path);
+    
+    println!("✅ Quantum-encrypted file downloaded and decrypted to: {}", output_path);
+    Ok(())
+}
+
 // Helper function to handle file download with optional decryption
 async fn download_file_with_decryption(
     client: &Client,
@@ -1683,6 +1771,102 @@ async fn download_file_with_decryption(
         // Regular download without decryption
         improved_download_file_with_auth(client, base_url, creds, &actual_file_name, output_path)
             .await
+    }
+}
+
+// Helper function to handle quantum encrypted file upload
+async fn upload_file_with_quantum_encryption(
+    client: &Client,
+    file_path: &Path,
+    full_url: &str,
+    file_name_in_bucket: &str,
+    creds: &SavedCredentials,
+    encrypt: bool,
+    password: Option<String>,
+    key: Option<String>,
+) -> Result<(String, f64)> {
+    use crate::quantum::sign_and_encrypt;
+    use crate::quantum_keyring::{generate_quantum_keypair, save_quantum_keypair};
+    
+    println!("🔐 Using quantum-resistant encryption (Kyber + Dilithium)...");
+    
+    // Generate quantum keypair
+    let quantum_keys = generate_quantum_keypair(file_name_in_bucket)?;
+    
+    // Read the file
+    let file_data = std::fs::read(file_path)?;
+    println!("  Original file size: {} bytes", file_data.len());
+    
+    // If password encryption is also requested, encrypt with password first
+    let data_to_quantum_encrypt = if encrypt {
+        let password = match password {
+            Some(p) => p,
+            None => {
+                let password = rpassword::prompt_password("Enter encryption password: ")?;
+                let confirm = rpassword::prompt_password("Confirm encryption password: ")?;
+                if password != confirm {
+                    return Err(anyhow!("Passwords do not match"));
+                }
+                password
+            }
+        };
+        
+        // Encrypt with password first
+        // Use a fixed salt for quantum context
+        let quantum_salt = b"pipe-quantum-v1-salt-2024";
+        let encryption_key = crate::encryption::derive_key_from_password(&password, quantum_salt)?;
+        let (encrypted, nonce) = crate::encryption::encrypt_data(&file_data, &encryption_key)?;
+        
+        // Combine nonce and encrypted data
+        let mut combined = nonce.to_vec();
+        combined.extend_from_slice(&encrypted);
+        combined
+    } else {
+        file_data
+    };
+    
+    // Apply quantum encryption (sign-then-encrypt)
+    let quantum_encrypted = sign_and_encrypt(
+        &data_to_quantum_encrypt,
+        &quantum_keys.dilithium_secret,
+        &quantum_keys.dilithium_public,
+        &quantum_keys.kyber_public,
+    )?;
+    
+    println!("  Quantum encrypted size: {} bytes", quantum_encrypted.len());
+    
+    // Save the quantum keys
+    save_quantum_keypair(&quantum_keys)?;
+    
+    // Create temporary file for upload
+    let temp_path = file_path.with_extension("qenc.tmp");
+    std::fs::write(&temp_path, &quantum_encrypted)?;
+    
+    // Update filename to indicate quantum encryption
+    let quantum_filename = format!("{}.qenc", file_name_in_bucket);
+    let full_url_quantum = full_url.replace(file_name_in_bucket, &quantum_filename);
+    
+    // Upload the quantum-encrypted file
+    let result = upload_file_with_shared_progress(
+        client,
+        &temp_path,
+        &full_url_quantum,
+        &quantum_filename,
+        creds,
+        None,
+    )
+    .await;
+    
+    // Clean up temp file
+    let _ = std::fs::remove_file(&temp_path);
+    
+    match result {
+        Ok((filename, cost)) => {
+            println!("✅ Quantum-encrypted file uploaded: {}", filename);
+            println!("🔑 Quantum keys saved for file: {}", file_name_in_bucket);
+            Ok((filename, cost))
+        }
+        Err(e) => Err(e),
     }
 }
 
@@ -2269,6 +2453,133 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod quantum_integration_tests {
+    use crate::quantum::{sign_and_encrypt, decrypt_and_verify};
+    use crate::quantum_keyring::{generate_quantum_keypair, save_quantum_keypair, load_quantum_keypair};
+
+    #[test]
+    fn test_quantum_keyring_operations() {
+        // Test quantum key generation and storage
+        let file_id = "test_file.txt";
+        
+        // Generate keys
+        let keypair = generate_quantum_keypair(file_id).unwrap();
+        assert_eq!(keypair.file_id, file_id);
+        assert!(!keypair.kyber_public.is_empty());
+        assert!(!keypair.kyber_secret.is_empty());
+        assert!(!keypair.dilithium_public.is_empty());
+        assert!(!keypair.dilithium_secret.is_empty());
+        
+        // Save and load keys
+        save_quantum_keypair(&keypair).unwrap();
+        let loaded_keypair = load_quantum_keypair(file_id).unwrap();
+        
+        assert_eq!(keypair.kyber_public, loaded_keypair.kyber_public);
+        assert_eq!(keypair.kyber_secret, loaded_keypair.kyber_secret);
+        assert_eq!(keypair.dilithium_public, loaded_keypair.dilithium_public);
+        assert_eq!(keypair.dilithium_secret, loaded_keypair.dilithium_secret);
+        
+        // Clean up
+        let _ = crate::quantum_keyring::delete_quantum_keypair(file_id);
+    }
+
+    #[test]
+    fn test_quantum_file_encryption_workflow() {
+        // Test the full quantum encryption workflow
+        let test_data = b"This is a test file for quantum encryption!";
+        let file_id = "quantum_test.txt";
+        
+        // Generate quantum keys
+        let keypair = generate_quantum_keypair(file_id).unwrap();
+        
+        // Encrypt with quantum crypto
+        let encrypted = sign_and_encrypt(
+            test_data,
+            &keypair.dilithium_secret,
+            &keypair.dilithium_public,
+            &keypair.kyber_public,
+        ).unwrap();
+        
+        // Verify encryption increased size significantly
+        assert!(encrypted.len() > test_data.len() + 1000); // Quantum crypto adds overhead
+        
+        // Decrypt and verify
+        let decrypted = decrypt_and_verify(
+            &encrypted,
+            &keypair.kyber_secret,
+        ).unwrap();
+        
+        assert_eq!(decrypted.data, test_data);
+        assert_eq!(decrypted.signer_public_key, keypair.dilithium_public);
+    }
+
+    #[test]
+    fn test_quantum_with_password_encryption() {
+        // Test quantum + password encryption combination
+        let test_data = b"Secret data with both quantum and password encryption";
+        let password = "test_password";
+        let file_id = "double_encrypted.txt";
+        
+        // Generate quantum keys
+        let keypair = generate_quantum_keypair(file_id).unwrap();
+        
+        // First encrypt with password
+        let quantum_salt = b"pipe-quantum-v1-salt-2024";
+        let encryption_key = crate::encryption::derive_key_from_password(password, quantum_salt).unwrap();
+        let (password_encrypted, nonce) = crate::encryption::encrypt_data(test_data, &encryption_key).unwrap();
+        
+        // Combine nonce and encrypted data
+        let mut combined = nonce.to_vec();
+        combined.extend_from_slice(&password_encrypted);
+        
+        // Then encrypt with quantum
+        let quantum_encrypted = sign_and_encrypt(
+            &combined,
+            &keypair.dilithium_secret,
+            &keypair.dilithium_public,
+            &keypair.kyber_public,
+        ).unwrap();
+        
+        // Decrypt quantum layer
+        let quantum_decrypted = decrypt_and_verify(
+            &quantum_encrypted,
+            &keypair.kyber_secret,
+        ).unwrap();
+        
+        // Extract nonce and decrypt password layer
+        let (nonce_bytes, encrypted_data) = quantum_decrypted.data.split_at(12);
+        let mut nonce_recovered = [0u8; 12];
+        nonce_recovered.copy_from_slice(nonce_bytes);
+        
+        let final_decrypted = crate::encryption::decrypt_data(
+            encrypted_data,
+            &encryption_key,
+            &nonce_recovered,
+        ).unwrap();
+        
+        assert_eq!(final_decrypted, test_data);
+    }
+
+    #[test]
+    fn test_quantum_filename_handling() {
+        // Test that .qenc extension is handled correctly
+        let filename = "document.pdf";
+        let quantum_filename = format!("{}.qenc", filename);
+        
+        assert!(quantum_filename.ends_with(".qenc"));
+        
+        // Test extraction of original filename
+        let original = if quantum_filename.ends_with(".qenc") {
+            &quantum_filename[..quantum_filename.len() - 5]
+        } else {
+            &quantum_filename
+        };
+        
+        assert_eq!(original, filename);
+    }
+}
+
 pub async fn run_cli() -> Result<()> {
     let cli = Cli::parse();
 
@@ -2781,8 +3092,8 @@ pub async fn run_cli() -> Result<()> {
             tier,
             encrypt,
             password,
-            key: _,
-            quantum: _,
+            key,
+            quantum,
         } => {
             // Load credentials and check for JWT
             let mut creds = load_credentials_from_file()?.ok_or_else(|| {
@@ -2839,19 +3150,37 @@ pub async fn run_cli() -> Result<()> {
             }
 
             // Use retry wrapper for single file upload
-            let upload_result = upload_with_retry(&format!("upload of {}", file_path), || {
-                upload_file_with_encryption(
-                    &client,
-                    local_path,
-                    &url,
-                    &file_name,
-                    &creds,
-                    encrypt,
-                    password.clone(),
-                    None,
-                )
-            })
-            .await;
+            let upload_result = if quantum {
+                // Quantum encryption upload
+                upload_with_retry(&format!("quantum upload of {}", file_path), || {
+                    upload_file_with_quantum_encryption(
+                        &client,
+                        local_path,
+                        &url,
+                        &file_name,
+                        &creds,
+                        encrypt,
+                        password.clone(),
+                        key.clone(),
+                    )
+                })
+                .await
+            } else {
+                // Regular upload (with optional password encryption)
+                upload_with_retry(&format!("upload of {}", file_path), || {
+                    upload_file_with_encryption(
+                        &client,
+                        local_path,
+                        &url,
+                        &file_name,
+                        &creds,
+                        encrypt,
+                        password.clone(),
+                        None,
+                    )
+                })
+                .await
+            };
 
             match upload_result {
                 Ok((uploaded_filename, token_cost)) => {
@@ -2882,6 +3211,7 @@ pub async fn run_cli() -> Result<()> {
             decrypt,
             password,
             key: _,
+            quantum,
         } => {
             // Load credentials and check for JWT
             let mut creds = load_credentials_from_file()?.ok_or_else(|| {
@@ -2910,16 +3240,32 @@ pub async fn run_cli() -> Result<()> {
             )
             .await;
 
-            download_file_with_decryption(
-                &client,
-                &selected_endpoint,
-                &creds,
-                &file_name,
-                &output_path,
-                decrypt,
-                password,
-            )
-            .await?;
+            // Check if this might be a quantum-encrypted file
+            let is_quantum_file = file_name.ends_with(".qenc") || quantum;
+            
+            if is_quantum_file {
+                download_file_with_quantum_decryption(
+                    &client,
+                    &selected_endpoint,
+                    &creds,
+                    &file_name,
+                    &output_path,
+                    decrypt,
+                    password,
+                )
+                .await?;
+            } else {
+                download_file_with_decryption(
+                    &client,
+                    &selected_endpoint,
+                    &creds,
+                    &file_name,
+                    &output_path,
+                    decrypt,
+                    password,
+                )
+                .await?;
+            }
         }
 
         Commands::DeleteFile {
