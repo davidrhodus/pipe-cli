@@ -79,6 +79,7 @@ pub fn load_quantum_keypair(file_id: &str) -> Result<QuantumKeyPair> {
 }
 
 /// List all quantum keys in the keyring
+#[allow(dead_code)]
 pub fn list_quantum_keys() -> Result<Vec<String>> {
     let keyring_dir = get_keyring_dir()?;
     let mut keys = Vec::new();
@@ -97,6 +98,7 @@ pub fn list_quantum_keys() -> Result<Vec<String>> {
 }
 
 /// Delete a quantum keypair
+#[allow(dead_code)]
 pub fn delete_quantum_keypair(file_id: &str) -> Result<()> {
     let keyring_dir = get_keyring_dir()?;
     let key_file = keyring_dir.join(format!("{}.quantum", file_id));

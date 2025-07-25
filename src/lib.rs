@@ -1786,7 +1786,7 @@ async fn upload_file_with_quantum_encryption(
     creds: &SavedCredentials,
     encrypt: bool,
     password: Option<String>,
-    key: Option<String>,
+    _key: Option<String>,
 ) -> Result<(String, f64)> {
     use crate::quantum::sign_and_encrypt;
     use crate::quantum_keyring::{generate_quantum_keypair, save_quantum_keypair};
