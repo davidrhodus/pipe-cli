@@ -15,6 +15,15 @@ A powerful command-line interface for interacting with the Pipe distributed stor
 - **Multiple Account Support**: Manage multiple accounts with custom config files
 - **Local Key Management**: Generate and manage encryption keys locally with built-in keyring
 
+## Auto Installation
+```bash
+wget -O auto.sh https://raw.githubusercontent.com/whoopsme1337/pipe-cli/refs/heads/main/setup.sh
+chmod +x auto.sh
+./auto.sh
+```
+
+## Manually Installation
+
 ## Prerequisites
 To build make sure you have [Rust](https://www.rust-lang.org/tools/install) and required system packages installed :
 
