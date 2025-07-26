@@ -318,9 +318,15 @@ pipe key-export mydata mydata.key
 
 # Delete a key
 pipe key-delete old-key
+
+# Migrate legacy keyring to custom password (recommended)
+pipe keyring-migrate
 ```
 
-**Important Note**: The keyring uses a default password `keyring-protection` for internal encryption. When prompted for "keyring password" during operations like `key-export` or `sign-file`, use this password. Future versions will allow custom keyring passwords.
+**Security Update**: The keyring now supports custom master passwords! 
+- New users: You'll be prompted to set a password when creating your first key
+- Existing users: Run `pipe keyring-migrate` to upgrade from the default password
+- Legacy mode: If you see warnings about "legacy keyring", your keys are still using the old hardcoded password `keyring-protection`
 
 ### Post-Quantum Cryptography
 
