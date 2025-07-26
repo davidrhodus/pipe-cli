@@ -772,7 +772,7 @@ async fn get_endpoint_for_operation(
     // Check if base_url has a non-standard port (not 80/443)
     // If so, bypass discovery and use the exact URL provided
     if let Ok(url) = reqwest::Url::parse(base_url) {
-        if let Some(port) = url.port() {
+        if let Some(_port) = url.port() {
             // Non-standard port specified, bypass discovery
             eprintln!("Using direct connection to {} (bypassing discovery)", base_url);
             return base_url.to_string();
@@ -5054,14 +5054,14 @@ pub async fn run_cli() -> Result<()> {
 
             if let Some(output_path) = output {
                 // Export to file
-                let password =
+                let export_password =
                     rpassword::prompt_password("Enter password to protect exported key: ")?;
                 let confirm = rpassword::prompt_password("Confirm password: ")?;
-                if password != confirm {
+                if export_password != confirm {
                     return Err(anyhow!("Passwords do not match"));
                 }
 
-                keyring::export_key(&keyring, &key_name, Path::new(&output_path), &password)?;
+                keyring::export_key(&keyring, &key_name, Path::new(&output_path), &keyring_password, &export_password)?;
                 println!("✅ Key exported to: {}", output_path);
 
                 // Don't save to keyring if exporting
@@ -5169,13 +5169,20 @@ pub async fn run_cli() -> Result<()> {
             let keyring_path = keyring::Keyring::default_path()?;
             let keyring = keyring::Keyring::load_from_file(&keyring_path)?;
 
-            let password = rpassword::prompt_password("Enter password to protect exported key: ")?;
+            // Get keyring password
+            let keyring_password = if keyring.is_legacy() {
+                "keyring-protection".to_string()
+            } else {
+                rpassword::prompt_password("Enter keyring password: ")?
+            };
+
+            let export_password = rpassword::prompt_password("Enter password to protect exported key: ")?;
             let confirm = rpassword::prompt_password("Confirm password: ")?;
-            if password != confirm {
+            if export_password != confirm {
                 return Err(anyhow!("Passwords do not match"));
             }
 
-            keyring::export_key(&keyring, &key_name, Path::new(&output), &password)?;
+            keyring::export_key(&keyring, &key_name, Path::new(&output), &keyring_password, &export_password)?;
             println!("✅ Key '{}' exported to: {}", key_name, output);
         }
 
