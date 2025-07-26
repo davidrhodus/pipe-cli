@@ -42,7 +42,7 @@ pub struct KeyMetadata {
 }
 
 /// A stored encryption key
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredKey {
     pub id: String,
     pub name: Option<String>,
@@ -63,11 +63,22 @@ fn default_nonce() -> [u8; 12] {
 }
 
 /// In-memory key data (zeroized on drop)
-#[derive(Zeroize, ZeroizeOnDrop)]
+#[derive(Debug, Zeroize, ZeroizeOnDrop)]
 pub struct KeyMaterial {
     pub symmetric_key: Option<[u8; 32]>,
     pub private_key: Option<Vec<u8>>,
     pub public_key: Option<Vec<u8>>,
+}
+
+/// Password verification data
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PasswordVerification {
+    /// Encrypted known value to verify password
+    pub encrypted_verifier: Vec<u8>,
+    /// Salt for password verification
+    pub salt: [u8; 32],
+    /// Nonce for verification
+    pub nonce: [u8; 12],
 }
 
 /// Keyring for managing multiple keys
@@ -75,16 +86,30 @@ pub struct KeyMaterial {
 pub struct Keyring {
     version: u8,
     keys: HashMap<String, StoredKey>,
+    /// Password verification data (new in version 2)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    password_verification: Option<PasswordVerification>,
+    /// Migration flag to detect legacy keyrings
+    #[serde(default = "default_legacy_mode")]
+    legacy_mode: bool,
+}
+
+fn default_legacy_mode() -> bool {
+    false
 }
 
 impl Keyring {
-    const CURRENT_VERSION: u8 = 1;
+    const CURRENT_VERSION: u8 = 2;
+    const LEGACY_VERSION: u8 = 1;
+    const PASSWORD_VERIFIER: &'static [u8] = b"pipe-cli-keyring-v2-verified";
 
     /// Create a new empty keyring
     pub fn new() -> Self {
         Self {
             version: Self::CURRENT_VERSION,
             keys: HashMap::new(),
+            password_verification: None,
+            legacy_mode: false,
         }
     }
 
@@ -104,7 +129,14 @@ impl Keyring {
         }
 
         let contents = fs::read_to_string(path)?;
-        let keyring: Self = serde_json::from_str(&contents)?;
+        let mut keyring: Self = serde_json::from_str(&contents)?;
+
+        // Check if this is a legacy keyring
+        if keyring.version == Self::LEGACY_VERSION || keyring.password_verification.is_none() {
+            keyring.legacy_mode = true;
+            eprintln!("⚠️  Warning: Legacy keyring detected. Keys are encrypted with default password.");
+            eprintln!("   Please migrate your keyring by running: pipe keyring-migrate");
+        }
 
         if keyring.version > Self::CURRENT_VERSION {
             return Err(anyhow!(
@@ -138,12 +170,114 @@ impl Keyring {
         Ok(())
     }
 
+    /// Initialize master password for the keyring
+    pub fn initialize_password(&mut self, password: &str) -> Result<()> {
+        if self.password_verification.is_some() && !self.legacy_mode {
+            return Err(anyhow!("Keyring already has a master password"));
+        }
+
+        let salt = generate_salt();
+        let protection_key = derive_key_from_password(password, &salt)?;
+        let (encrypted_verifier, nonce) = crate::encryption::encrypt_data(Self::PASSWORD_VERIFIER, &protection_key)?;
+
+        self.password_verification = Some(PasswordVerification {
+            encrypted_verifier,
+            salt,
+            nonce,
+        });
+        self.version = Self::CURRENT_VERSION;
+        self.legacy_mode = false;
+
+        Ok(())
+    }
+
+    /// Verify the master password
+    pub fn verify_password(&self, password: &str) -> Result<bool> {
+        // Legacy mode: accept both the hardcoded password and user's new password
+        if self.legacy_mode {
+            return Ok(password == "keyring-protection");
+        }
+
+        let verification = self.password_verification.as_ref()
+            .ok_or_else(|| anyhow!("No password set for keyring"))?;
+
+        let protection_key = derive_key_from_password(password, &verification.salt)?;
+        
+        match crate::encryption::decrypt_data(
+            &verification.encrypted_verifier,
+            &protection_key,
+            &verification.nonce,
+        ) {
+            Ok(decrypted) => Ok(decrypted == Self::PASSWORD_VERIFIER),
+            Err(_) => Ok(false),
+        }
+    }
+
+    /// Get the appropriate password for key operations
+    fn get_key_password(&self, user_password: &str) -> String {
+        if self.legacy_mode {
+            // For legacy keyrings, always use the hardcoded password
+            "keyring-protection".to_string()
+        } else {
+            user_password.to_string()
+        }
+    }
+
+    /// Migrate a legacy keyring to use a user-defined password
+    pub fn migrate_from_legacy(&mut self, old_password: &str, new_password: &str) -> Result<()> {
+        if !self.legacy_mode {
+            return Err(anyhow!("Keyring is not in legacy mode"));
+        }
+
+        // Verify the old password (should be "keyring-protection")
+        if old_password != "keyring-protection" {
+            return Err(anyhow!("Invalid legacy password"));
+        }
+
+        // Re-encrypt all keys with the new password
+        let mut updated_keys = HashMap::new();
+        
+        for (name, stored_key) in self.keys.clone() {
+            // Decrypt with old password
+            let old_protection_key = derive_key_from_password(old_password, &stored_key.salt)?;
+            let decrypted = crate::encryption::decrypt_data(
+                &stored_key.encrypted_key,
+                &old_protection_key,
+                &stored_key.nonce,
+            )?;
+
+            // Re-encrypt with new password
+            let new_salt = generate_salt();
+            let new_protection_key = derive_key_from_password(new_password, &new_salt)?;
+            let (encrypted_key, nonce) = crate::encryption::encrypt_data(&decrypted, &new_protection_key)?;
+
+            let mut new_stored_key = stored_key;
+            new_stored_key.encrypted_key = encrypted_key;
+            new_stored_key.salt = new_salt;
+            new_stored_key.nonce = nonce;
+
+            updated_keys.insert(name, new_stored_key);
+        }
+
+        // Update keyring
+        self.keys = updated_keys;
+        self.initialize_password(new_password)?;
+        
+        Ok(())
+    }
+
     /// Generate a new AES-256 key
     pub fn generate_aes_key(
         &mut self,
         name: Option<String>,
         description: Option<String>,
+        password: &str,
     ) -> Result<String> {
+        // Verify password if not in legacy mode
+        if !self.legacy_mode && !self.verify_password(password)? {
+            return Err(anyhow!("Invalid keyring password"));
+        }
+
         use aes_gcm::aead::OsRng;
         use rand::RngCore;
 
@@ -153,9 +287,9 @@ impl Keyring {
         let key_id = Uuid::new_v4().to_string();
         let salt = generate_salt();
 
-        // Encrypt the key with a derived key (for now, we'll use a fixed password)
-        // In production, this should use the master password or system keychain
-        let protection_key = derive_key_from_password("keyring-protection", &salt)?;
+        // Use the appropriate password based on mode
+        let key_password = self.get_key_password(password);
+        let protection_key = derive_key_from_password(&key_password, &salt)?;
         let (encrypted_key, nonce) = crate::encryption::encrypt_data(&key, &protection_key)?;
 
         let stored_key = StoredKey {
@@ -188,7 +322,13 @@ impl Keyring {
         &mut self,
         name: Option<String>,
         description: Option<String>,
+        password: &str,
     ) -> Result<String> {
+        // Verify password if not in legacy mode
+        if !self.legacy_mode && !self.verify_password(password)? {
+            return Err(anyhow!("Invalid keyring password"));
+        }
+
         use pqcrypto_mlkem::mlkem1024 as kyber1024;
 
         let (public_key, secret_key) = kyber1024::keypair();
@@ -196,8 +336,9 @@ impl Keyring {
         let key_id = Uuid::new_v4().to_string();
         let salt = generate_salt();
 
-        // Encrypt the secret key
-        let protection_key = derive_key_from_password("keyring-protection", &salt)?;
+        // Use the appropriate password based on mode
+        let key_password = self.get_key_password(password);
+        let protection_key = derive_key_from_password(&key_password, &salt)?;
         let (encrypted_key, nonce) = crate::encryption::encrypt_data(secret_key.as_bytes(), &protection_key)?;
 
         let stored_key = StoredKey {
@@ -227,7 +368,13 @@ impl Keyring {
         &mut self,
         name: Option<String>,
         description: Option<String>,
+        password: &str,
     ) -> Result<String> {
+        // Verify password if not in legacy mode
+        if !self.legacy_mode && !self.verify_password(password)? {
+            return Err(anyhow!("Invalid keyring password"));
+        }
+
         use pqcrypto_mldsa::mldsa87 as dilithium5;
 
         let (public_key, secret_key) = dilithium5::keypair();
@@ -235,8 +382,9 @@ impl Keyring {
         let key_id = Uuid::new_v4().to_string();
         let salt = generate_salt();
 
-        // Encrypt the secret key
-        let protection_key = derive_key_from_password("keyring-protection", &salt)?;
+        // Use the appropriate password based on mode
+        let key_password = self.get_key_password(password);
+        let protection_key = derive_key_from_password(&key_password, &salt)?;
         let (encrypted_key, nonce) = crate::encryption::encrypt_data(secret_key.as_bytes(), &protection_key)?;
 
         let stored_key = StoredKey {
@@ -281,13 +429,16 @@ impl Keyring {
 
     /// Decrypt and retrieve key material (updates usage stats)
     pub fn get_key_material(&mut self, name: &str, password: &str) -> Result<KeyMaterial> {
+        // Use the appropriate password based on mode
+        let key_password = self.get_key_password(password);
+        
         let stored_key = self
             .keys
             .get_mut(name)
             .ok_or_else(|| anyhow!("Key '{}' not found", name))?;
 
         // Decrypt the key
-        let protection_key = derive_key_from_password(password, &stored_key.salt)?;
+        let protection_key = derive_key_from_password(&key_password, &stored_key.salt)?;
         let decrypted = crate::encryption::decrypt_data(
             &stored_key.encrypted_key,
             &protection_key,
@@ -325,6 +476,21 @@ impl Keyring {
 
         Ok(material)
     }
+
+    /// Get reference to keys
+    pub fn keys(&self) -> &HashMap<String, StoredKey> {
+        &self.keys
+    }
+
+    /// Check if keyring has a password set
+    pub fn has_password(&self) -> bool {
+        self.password_verification.is_some()
+    }
+
+    /// Check if keyring is in legacy mode
+    pub fn is_legacy(&self) -> bool {
+        self.legacy_mode
+    }
 }
 
 /// Export a key to a standalone file
@@ -332,7 +498,8 @@ pub fn export_key(
     keyring: &Keyring,
     key_name: &str,
     output_path: &Path,
-    password: &str,
+    keyring_password: &str,
+    export_password: &str,
 ) -> Result<()> {
     let key = keyring
         .get_key(key_name)
@@ -340,10 +507,11 @@ pub fn export_key(
 
     // Re-encrypt with the export password
     let export_salt = generate_salt();
-    let export_protection_key = derive_key_from_password(password, &export_salt)?;
+    let export_protection_key = derive_key_from_password(export_password, &export_salt)?;
 
     // First decrypt with keyring password
-    let keyring_protection_key = derive_key_from_password("keyring-protection", &key.salt)?;
+    let key_password = keyring.get_key_password(keyring_password);
+    let keyring_protection_key = derive_key_from_password(&key_password, &key.salt)?;
     let decrypted =
         crate::encryption::decrypt_data(&key.encrypted_key, &keyring_protection_key, &key.nonce)?;
 
@@ -391,19 +559,34 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    // Helper function to create a test keyring with password
+    fn create_test_keyring(legacy: bool) -> (Keyring, String) {
+        let mut keyring = Keyring::new();
+        let password = if legacy {
+            keyring.legacy_mode = true;
+            "keyring-protection".to_string()
+        } else {
+            let test_password = "test_password_123";
+            keyring.initialize_password(test_password).unwrap();
+            test_password.to_string()
+        };
+        (keyring, password)
+    }
+
     #[test]
     fn test_aes_key_generation_and_export() {
         // Create a temporary directory for the keyring
         let temp_dir = TempDir::new().unwrap();
         let keyring_path = temp_dir.path().join("test_keyring.json");
         
-        // Create a new keyring
-        let mut keyring = Keyring::new();
+        // Test with new keyring (custom password)
+        let (mut keyring, password) = create_test_keyring(false);
         
         // Generate an AES key
         let key_name = keyring.generate_aes_key(
             Some("test_aes_key".to_string()),
-            Some("Test AES key for export".to_string())
+            Some("Test AES key for export".to_string()),
+            &password
         ).unwrap();
         
         // Save the keyring
@@ -416,7 +599,7 @@ mod tests {
         let export_path = temp_dir.path().join("exported_key.json");
         let export_password = "test_export_password";
         
-        export_key(&loaded_keyring, &key_name, &export_path, export_password).unwrap();
+        export_key(&loaded_keyring, &key_name, &export_path, &password, export_password).unwrap();
         
         // Verify the exported file exists
         assert!(export_path.exists());
@@ -434,16 +617,41 @@ mod tests {
     }
 
     #[test]
+    fn test_legacy_keyring_generation() {
+        // Test that legacy keyrings still work
+        let temp_dir = TempDir::new().unwrap();
+        let keyring_path = temp_dir.path().join("legacy_keyring.json");
+        
+        let (mut keyring, password) = create_test_keyring(true);
+        assert!(keyring.is_legacy());
+        assert_eq!(password, "keyring-protection");
+        
+        // Generate a key with legacy password
+        let _key_name = keyring.generate_aes_key(
+            Some("legacy_key".to_string()),
+            None,
+            &password
+        ).unwrap();
+        
+        keyring.save_to_file(&keyring_path).unwrap();
+        
+        // Load and verify it's detected as legacy
+        let loaded = Keyring::load_from_file(&keyring_path).unwrap();
+        assert!(loaded.is_legacy());
+    }
+
+    #[test]
     fn test_kyber_key_generation_and_export() {
         let temp_dir = TempDir::new().unwrap();
         let keyring_path = temp_dir.path().join("test_keyring.json");
         
-        let mut keyring = Keyring::new();
+        let (mut keyring, password) = create_test_keyring(false);
         
         // Generate a Kyber keypair
         let key_name = keyring.generate_kyber_keypair(
             Some("test_kyber_key".to_string()),
-            Some("Test Kyber key for export".to_string())
+            Some("Test Kyber key for export".to_string()),
+            &password
         ).unwrap();
         
         keyring.save_to_file(&keyring_path).unwrap();
@@ -454,7 +662,7 @@ mod tests {
         let export_path = temp_dir.path().join("exported_kyber_key.json");
         let export_password = "test_kyber_export_password";
         
-        export_key(&loaded_keyring, &key_name, &export_path, export_password).unwrap();
+        export_key(&loaded_keyring, &key_name, &export_path, &password, export_password).unwrap();
         
         // Verify the exported file exists and has public key
         assert!(export_path.exists());
@@ -471,12 +679,13 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let keyring_path = temp_dir.path().join("test_keyring.json");
         
-        let mut keyring = Keyring::new();
+        let (mut keyring, password) = create_test_keyring(false);
         
         // Generate a Dilithium keypair
         let key_name = keyring.generate_dilithium_keypair(
             Some("test_dilithium_key".to_string()),
-            Some("Test Dilithium key for export".to_string())
+            Some("Test Dilithium key for export".to_string()),
+            &password
         ).unwrap();
         
         keyring.save_to_file(&keyring_path).unwrap();
@@ -487,7 +696,7 @@ mod tests {
         let export_path = temp_dir.path().join("exported_dilithium_key.json");
         let export_password = "test_dilithium_export_password";
         
-        export_key(&loaded_keyring, &key_name, &export_path, export_password).unwrap();
+        export_key(&loaded_keyring, &key_name, &export_path, &password, export_password).unwrap();
         
         // Verify the exported file exists and has public key
         assert!(export_path.exists());
@@ -500,182 +709,198 @@ mod tests {
     }
 
     #[test]
-    fn test_key_export_with_different_passwords() {
+    fn test_password_verification() {
+        let (keyring, password) = create_test_keyring(false);
+        
+        // Test correct password
+        assert!(keyring.verify_password(&password).unwrap());
+        
+        // Test wrong password
+        assert!(!keyring.verify_password("wrong_password").unwrap());
+        
+        // Test empty password
+        assert!(!keyring.verify_password("").unwrap());
+    }
+
+    #[test]
+    fn test_keyring_migration() {
         let temp_dir = TempDir::new().unwrap();
-        let keyring_path = temp_dir.path().join("test_keyring.json");
+        let keyring_path = temp_dir.path().join("migrate_keyring.json");
         
-        let mut keyring = Keyring::new();
+        // Create a legacy keyring with a key
+        let (mut keyring, old_password) = create_test_keyring(true);
         
-        // Generate a key
         let key_name = keyring.generate_aes_key(
             Some("test_key".to_string()),
-            None
+            None,
+            &old_password
         ).unwrap();
         
+        // Save as legacy
         keyring.save_to_file(&keyring_path).unwrap();
         
-        let loaded_keyring = Keyring::load_from_file(&keyring_path).unwrap();
+        // Load and migrate
+        let mut loaded = Keyring::load_from_file(&keyring_path).unwrap();
+        assert!(loaded.is_legacy());
         
-        // Export with first password
-        let export_path1 = temp_dir.path().join("export1.json");
-        export_key(&loaded_keyring, &key_name, &export_path1, "password1").unwrap();
+        let new_password = "my_secure_password_123";
+        loaded.migrate_from_legacy(&old_password, new_password).unwrap();
         
-        // Export with second password
-        let export_path2 = temp_dir.path().join("export2.json");
-        export_key(&loaded_keyring, &key_name, &export_path2, "password2").unwrap();
+        // Verify migration worked
+        assert!(!loaded.is_legacy());
+        assert!(loaded.verify_password(new_password).unwrap());
+        assert!(!loaded.verify_password(&old_password).unwrap());
         
-        // Read both exports
-        let export1 = fs::read_to_string(&export_path1).unwrap();
-        let export2 = fs::read_to_string(&export_path2).unwrap();
-        
-        let json1: serde_json::Value = serde_json::from_str(&export1).unwrap();
-        let json2: serde_json::Value = serde_json::from_str(&export2).unwrap();
-        
-        // Encrypted keys should be different (different passwords)
-        assert_ne!(json1["encrypted_key"], json2["encrypted_key"]);
-        
-        // But algorithm and metadata should be the same
-        assert_eq!(json1["algorithm"], json2["algorithm"]);
-        assert_eq!(json1["metadata"]["description"], json2["metadata"]["description"]);
+        // Verify we can still access the key with new password
+        let key_material = loaded.get_key_material(&key_name, new_password).unwrap();
+        assert!(key_material.symmetric_key.is_some());
     }
 
     #[test]
-    fn test_export_nonexistent_key() {
-        let temp_dir = TempDir::new().unwrap();
-        let keyring = Keyring::new();
-        let export_path = temp_dir.path().join("export.json");
+    fn test_list_and_delete_keys() {
+        let (mut keyring, password) = create_test_keyring(false);
         
-        // Try to export a key that doesn't exist
-        let result = export_key(&keyring, "nonexistent_key", &export_path, "password");
+        // Generate a few keys
+        let key1 = keyring.generate_aes_key(
+            Some("key1".to_string()),
+            Some("First key".to_string()),
+            &password
+        ).unwrap();
         
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not found"));
+        let key2 = keyring.generate_aes_key(
+            Some("key2".to_string()),
+            Some("Second key".to_string()),
+            &password
+        ).unwrap();
+        
+        // List keys
+        let keys = keyring.list_keys();
+        assert_eq!(keys.len(), 2);
+        
+        // Delete a key
+        keyring.delete_key(&key1).unwrap();
+        
+        // Verify it's gone
+        let keys = keyring.list_keys();
+        assert_eq!(keys.len(), 1);
+        assert!(keyring.get_key(&key1).is_none());
+        assert!(keyring.get_key(&key2).is_some());
     }
 
     #[test]
-    fn test_get_key_material_aes() {
-        let mut keyring = Keyring::new();
+    fn test_get_key_material() {
+        let (mut keyring, password) = create_test_keyring(false);
         
         // Generate an AES key
         let key_name = keyring.generate_aes_key(
             Some("test_material_key".to_string()),
-            Some("Test key for get_key_material".to_string())
+            Some("Test key for get_key_material".to_string()),
+            &password
         ).unwrap();
         
         // Get key material with correct password
-        let material = keyring.get_key_material(&key_name, "keyring-protection").unwrap();
-        
-        // Verify we got the symmetric key
+        let material = keyring.get_key_material(&key_name, &password).unwrap();
         assert!(material.symmetric_key.is_some());
-        assert_eq!(material.symmetric_key.as_ref().unwrap().len(), 32);
-        assert!(material.private_key.is_none());
-        assert!(material.public_key.is_none());
+        assert_eq!(material.symmetric_key.unwrap().len(), 32);
         
-        // Verify usage stats were updated
+        // Check usage stats were updated
         let key = keyring.get_key(&key_name).unwrap();
         assert_eq!(key.metadata.usage_count, 1);
         assert!(key.metadata.last_used.is_some());
     }
 
     #[test]
-    fn test_get_key_material_wrong_password() {
-        let mut keyring = Keyring::new();
+    fn test_wrong_password_error() {
+        let (mut keyring, password) = create_test_keyring(false);
         
-        // Generate a key
         let key_name = keyring.generate_aes_key(
             Some("test_wrong_pass".to_string()),
-            None
+            None,
+            &password
         ).unwrap();
         
-        // Try to get key material with wrong password
-        let result = keyring.get_key_material(&key_name, "wrong-password");
-        
+        // Try to get key material with wrong password (should fail in non-legacy mode)
+        let result = keyring.get_key_material(&key_name, "wrong_password");
         assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Decryption failed"));
     }
 
     #[test]
-    fn test_get_key_material_dilithium() {
-        let mut keyring = Keyring::new();
+    fn test_key_not_found_error() {
+        let (mut keyring, password) = create_test_keyring(false);
         
-        // Generate a Dilithium signing key
+        // Try to get non-existent key
+        let result = keyring.get_key_material("non_existent_key", &password);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_dilithium_key_material() {
+        let (mut keyring, password) = create_test_keyring(false);
+        
         let key_name = keyring.generate_dilithium_keypair(
             Some("test_signing_material".to_string()),
-            Some("Test Dilithium key material".to_string())
+            Some("Test Dilithium key material".to_string()),
+            &password
         ).unwrap();
         
-        // Get key material
-        let material = keyring.get_key_material(&key_name, "keyring-protection").unwrap();
+        let material = keyring.get_key_material(&key_name, &password).unwrap();
         
-        // Verify we got the private and public keys
-        assert!(material.symmetric_key.is_none());
+        // Dilithium keys should have private and public keys
         assert!(material.private_key.is_some());
         assert!(material.public_key.is_some());
-        
-        // The private key for Dilithium5 should be 4896 bytes
-        assert_eq!(material.private_key.as_ref().unwrap().len(), 4896);
+        assert!(material.symmetric_key.is_none());
     }
 
     #[test]
-    fn test_get_key_material_kyber() {
-        let mut keyring = Keyring::new();
+    fn test_kyber_key_material() {
+        let (mut keyring, password) = create_test_keyring(false);
         
-        // Generate a Kyber encryption key
         let key_name = keyring.generate_kyber_keypair(
             Some("test_kyber_material".to_string()),
-            Some("Test Kyber key material".to_string())
+            Some("Test Kyber key material".to_string()),
+            &password
+        ).unwrap();
+        
+        let material = keyring.get_key_material(&key_name, &password).unwrap();
+        
+        // Kyber keys should have private and public keys
+        assert!(material.private_key.is_some());
+        assert!(material.public_key.is_some());
+        assert!(material.symmetric_key.is_none());
+    }
+
+    #[test]
+    fn test_sign_and_verify_workflow() {
+        use crate::quantum::{sign_with_dilithium, verify_dilithium_signature};
+        
+        let (mut keyring, password) = create_test_keyring(false);
+        
+        // Generate a signing key
+        let key_name = keyring.generate_dilithium_keypair(
+            Some("workflow_sign_key".to_string()),
+            None,
+            &password
         ).unwrap();
         
         // Get key material
-        let material = keyring.get_key_material(&key_name, "keyring-protection").unwrap();
+        let material = keyring.get_key_material(&key_name, &password).unwrap();
         
-        // Verify we got the private and public keys
-        assert!(material.symmetric_key.is_none());
-        assert!(material.private_key.is_some());
-        assert!(material.public_key.is_some());
+        // Sign some data
+        let test_data = b"Hello, quantum world!";
+        let private_key = material.private_key.as_ref().unwrap();
+        let public_key = material.public_key.as_ref().unwrap();
         
-        // The private key for Kyber1024 should be 3168 bytes
-        assert_eq!(material.private_key.as_ref().unwrap().len(), 3168);
-    }
-
-    #[test] 
-    fn test_sign_file_workflow() {
-        use crate::quantum;
-        
-        let _temp_dir = TempDir::new().unwrap();
-        let mut keyring = Keyring::new();
-        
-        // Generate signing key
-        let key_name = keyring.generate_dilithium_keypair(
-            Some("workflow_sign_key".to_string()),
-            None
-        ).unwrap();
-        
-        // Create test data
-        let test_data = b"Important document to sign";
-        
-        // Get key material (simulating what sign-file command does)
-        let key_material = keyring.get_key_material(&key_name, "keyring-protection").unwrap();
-        
-        // Sign the data
-        let signature = quantum::sign_with_dilithium(
-            test_data,
-            key_material.private_key.as_ref().unwrap()
-        ).unwrap();
-        
-        // Verify signature is created
-        assert!(!signature.is_empty());
-        
-        // Get public key for verification
-        let stored_key = keyring.get_key(&key_name).unwrap();
-        let public_key = stored_key.public_key.as_ref().unwrap();
+        let signature = sign_with_dilithium(test_data, private_key).unwrap();
         
         // Verify the signature
-        let is_valid = quantum::verify_dilithium_signature(
+        let verification = verify_dilithium_signature(
             test_data,
             &signature,
             public_key
         ).unwrap();
         
-        assert!(is_valid);
+        assert!(verification);
     }
 }

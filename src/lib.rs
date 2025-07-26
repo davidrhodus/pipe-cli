@@ -275,6 +275,12 @@ pub enum Commands {
         output: String,
     },
 
+    /// Migrate legacy keyring to use custom master password
+    KeyringMigrate {
+        #[arg(long, help = "Skip confirmation prompts")]
+        force: bool,
+    },
+
     /// Sign a file with Dilithium
     SignFile {
         /// File to sign
@@ -398,6 +404,10 @@ pub enum Commands {
     /// Get pricing for all upload tiers
     GetTierPricing,
 
+    /// Manage referral codes
+    #[command(subcommand)]
+    Referral(ReferralCommands),
+
     PriorityUpload {
         #[arg(long)]
         user_id: Option<String>,
@@ -427,6 +437,19 @@ pub enum Commands {
         user_app_key: Option<String>,
         file_name: String,
         additional_months: u64,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ReferralCommands {
+    /// Generate your referral code
+    Generate,
+    /// Show your referral code and stats
+    Show,
+    /// Apply a referral code to your account
+    Apply {
+        /// The referral code to apply
+        code: String,
     },
 }
 
@@ -746,6 +769,16 @@ async fn get_endpoint_for_operation(
     user_id: &str,
     file_name: Option<&str>,
 ) -> String {
+    // Check if base_url has a non-standard port (not 80/443)
+    // If so, bypass discovery and use the exact URL provided
+    if let Ok(url) = reqwest::Url::parse(base_url) {
+        if let Some(_port) = url.port() {
+            // Non-standard port specified, bypass discovery
+            eprintln!("Using direct connection to {} (bypassing discovery)", base_url);
+            return base_url.to_string();
+        }
+    }
+    
     // First try to refresh if needed
     let _ = service_cache.get_best_endpoint(client, base_url).await;
 
@@ -4978,18 +5011,38 @@ pub async fn run_cli() -> Result<()> {
             let keyring_path = keyring::Keyring::default_path()?;
             let mut keyring = keyring::Keyring::load_from_file(&keyring_path)?;
 
+            // Get keyring password
+            let keyring_password = if keyring.keys().is_empty() && !keyring.has_password() {
+                // First time setup - initialize keyring password
+                println!("🔐 Setting up keyring master password...");
+                let password = rpassword::prompt_password("Enter new keyring password: ")?;
+                let confirm = rpassword::prompt_password("Confirm keyring password: ")?;
+                if password != confirm {
+                    return Err(anyhow!("Passwords do not match"));
+                }
+                keyring.initialize_password(&password)?;
+                password
+            } else if keyring.is_legacy() {
+                // Legacy keyring - use hardcoded password
+                eprintln!("⚠️  Using legacy keyring password. Run 'pipe keyring-migrate' to set a custom password.");
+                "keyring-protection".to_string()
+            } else {
+                // Normal operation - prompt for password
+                rpassword::prompt_password("Enter keyring password: ")?
+            };
+
             let key_name = match algo {
                 "aes256" => {
                     println!("🔑 Generating AES-256 key...");
-                    keyring.generate_aes_key(name, description)?
+                    keyring.generate_aes_key(name, description, &keyring_password)?
                 }
                 "kyber1024" => {
                     println!("🔐 Generating Kyber1024 keypair (post-quantum)...");
-                    keyring.generate_kyber_keypair(name, description)?
+                    keyring.generate_kyber_keypair(name, description, &keyring_password)?
                 }
                 "dilithium5" => {
                     println!("✍️  Generating Dilithium5 signing keypair (post-quantum)...");
-                    keyring.generate_dilithium_keypair(name, description)?
+                    keyring.generate_dilithium_keypair(name, description, &keyring_password)?
                 }
                 _ => {
                     return Err(anyhow!(
@@ -5001,14 +5054,14 @@ pub async fn run_cli() -> Result<()> {
 
             if let Some(output_path) = output {
                 // Export to file
-                let password =
+                let export_password =
                     rpassword::prompt_password("Enter password to protect exported key: ")?;
                 let confirm = rpassword::prompt_password("Confirm password: ")?;
-                if password != confirm {
+                if export_password != confirm {
                     return Err(anyhow!("Passwords do not match"));
                 }
 
-                keyring::export_key(&keyring, &key_name, Path::new(&output_path), &password)?;
+                keyring::export_key(&keyring, &key_name, Path::new(&output_path), &keyring_password, &export_password)?;
                 println!("✅ Key exported to: {}", output_path);
 
                 // Don't save to keyring if exporting
@@ -5018,6 +5071,58 @@ pub async fn run_cli() -> Result<()> {
                 keyring.save_to_file(&keyring_path)?;
                 println!("✅ Key '{}' generated and saved to keyring", key_name);
             }
+        }
+
+        Commands::KeyringMigrate { force } => {
+            let keyring_path = keyring::Keyring::default_path()?;
+            let mut keyring = keyring::Keyring::load_from_file(&keyring_path)?;
+
+            if !keyring.is_legacy() {
+                println!("✅ Keyring is already using custom password protection.");
+                return Ok(());
+            }
+
+            println!("🔐 Keyring Migration");
+            println!("===================");
+            println!();
+            println!("This will migrate your keyring from the default password to a custom master password.");
+            println!("Your existing keys will be re-encrypted with the new password.");
+            println!();
+
+            if !force {
+                print!("Continue? [y/N]: ");
+                std::io::stdout().flush()?;
+                let mut response = String::new();
+                std::io::stdin().read_line(&mut response)?;
+                if !response.trim().eq_ignore_ascii_case("y") {
+                    println!("Migration cancelled.");
+                    return Ok(());
+                }
+            }
+
+            // Get new master password
+            println!("\nSetting up new master password...");
+            let new_password = rpassword::prompt_password("Enter new keyring password: ")?;
+            let confirm = rpassword::prompt_password("Confirm new keyring password: ")?;
+            
+            if new_password != confirm {
+                return Err(anyhow!("Passwords do not match"));
+            }
+
+            if new_password.len() < 8 {
+                return Err(anyhow!("Password must be at least 8 characters long"));
+            }
+
+            // Perform migration
+            println!("\nMigrating keyring...");
+            keyring.migrate_from_legacy("keyring-protection", &new_password)?;
+            
+            // Save the migrated keyring
+            keyring.save_to_file(&keyring_path)?;
+
+            println!("✅ Keyring migration completed successfully!");
+            println!("   Your keys are now protected with your custom password.");
+            println!("   Please remember this password - it cannot be recovered!");
         }
 
         Commands::KeyList => {
@@ -5064,13 +5169,20 @@ pub async fn run_cli() -> Result<()> {
             let keyring_path = keyring::Keyring::default_path()?;
             let keyring = keyring::Keyring::load_from_file(&keyring_path)?;
 
-            let password = rpassword::prompt_password("Enter password to protect exported key: ")?;
+            // Get keyring password
+            let keyring_password = if keyring.is_legacy() {
+                "keyring-protection".to_string()
+            } else {
+                rpassword::prompt_password("Enter keyring password: ")?
+            };
+
+            let export_password = rpassword::prompt_password("Enter password to protect exported key: ")?;
             let confirm = rpassword::prompt_password("Confirm password: ")?;
-            if password != confirm {
+            if export_password != confirm {
                 return Err(anyhow!("Passwords do not match"));
             }
 
-            keyring::export_key(&keyring, &key_name, Path::new(&output), &password)?;
+            keyring::export_key(&keyring, &key_name, Path::new(&output), &keyring_password, &export_password)?;
             println!("✅ Key '{}' exported to: {}", key_name, output);
         }
 
@@ -5159,6 +5271,120 @@ pub async fn run_cli() -> Result<()> {
             } else {
                 println!("❌ Signature verification FAILED");
                 println!("   The file may have been modified or signed with a different key");
+            }
+        }
+
+        Commands::Referral(subcmd) => {
+            // Load credentials
+            let mut creds = load_credentials_from_file(config_path)?.ok_or_else(|| {
+                anyhow!("No credentials found. Please create a user or login first.")
+            })?;
+
+            // Ensure we have valid JWT token
+            ensure_valid_token(&client, base_url, &mut creds, config_path).await?;
+
+            // Get the JWT token
+            let jwt_token = creds.auth_tokens.as_ref()
+                .ok_or_else(|| anyhow!("No authentication tokens found."))?
+                .access_token.clone();
+
+            match subcmd {
+                ReferralCommands::Generate => {
+                    let resp = client
+                        .post(format!("{}/api/referral/generate", base_url))
+                        .header("Authorization", format!("Bearer {}", jwt_token))
+                        .send()
+                        .await?;
+
+                    let status = resp.status();
+                    let text_body = resp.text().await?;
+
+                    if status.is_success() {
+                        let response: serde_json::Value = serde_json::from_str(&text_body)?;
+                        let code = response["code"].as_str().unwrap_or("Unknown");
+                        let existing = response["existing"].as_bool().unwrap_or(false);
+
+                        if existing {
+                            println!("Your existing referral code: {}", code);
+                        } else {
+                            println!("🎉 Your new referral code: {}", code);
+                        }
+                        println!("Share this code to earn 100 PIPE when someone uses it!");
+                    } else {
+                        return Err(anyhow!(
+                            "Failed to generate referral code. Status={}, Body={}",
+                            status,
+                            text_body
+                        ));
+                    }
+                }
+
+                ReferralCommands::Show => {
+                    // Get the code
+                    let code_resp = client
+                        .get(format!("{}/api/referral/my-code", base_url))
+                        .header("Authorization", format!("Bearer {}", jwt_token))
+                        .send()
+                        .await;
+
+                    match code_resp {
+                        Ok(resp) if resp.status().is_success() => {
+                            let text_body = resp.text().await?;
+                            let response: serde_json::Value = serde_json::from_str(&text_body)?;
+                            let code = response["code"].as_str().unwrap_or("Unknown");
+                            println!("Your referral code: {}", code);
+
+                            // Get stats
+                            let stats_resp = client
+                                .get(format!("{}/api/referral/stats", base_url))
+                                .header("Authorization", format!("Bearer {}", jwt_token))
+                                .send()
+                                .await?;
+
+                            if stats_resp.status().is_success() {
+                                let stats_body = stats_resp.text().await?;
+                                let stats: serde_json::Value = serde_json::from_str(&stats_body)?;
+
+                                println!("\n📊 Referral Statistics:");
+                                println!("  Total uses: {}", stats["total_uses"]);
+                                println!("  Successful referrals: {}", stats["successful_referrals"]);
+                                println!("  Pending referrals: {}", stats["pending_referrals"]);
+                                println!("  Total PIPE earned: {}", stats["total_pipe_earned"]);
+                            }
+                        }
+                        _ => {
+                            println!("You don't have a referral code yet. Generate one with 'pipe referral generate'");
+                        }
+                    }
+                }
+
+                ReferralCommands::Apply { code } => {
+                    let req_body = serde_json::json!({ "code": code });
+                    let resp = client
+                        .post(format!("{}/api/referral/apply", base_url))
+                        .header("Authorization", format!("Bearer {}", jwt_token))
+                        .json(&req_body)
+                        .send()
+                        .await?;
+
+                    let status = resp.status();
+                    let text_body = resp.text().await?;
+
+                    if status.is_success() {
+                        let response: serde_json::Value = serde_json::from_str(&text_body)?;
+                        if response["success"].as_bool().unwrap_or(false) {
+                            println!("✅ {}", response["message"].as_str().unwrap_or("Referral code applied successfully!"));
+                        } else {
+                            println!("❌ {}", response["message"].as_str().unwrap_or("Failed to apply referral code"));
+                        }
+                    } else {
+                        return Err(anyhow!(
+                            "Failed to apply referral code. Status={}, Body={}",
+                            status,
+                            text_body
+                        ));
+                    }
+                }
             }
         }
     }
