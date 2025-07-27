@@ -65,14 +65,22 @@ pipe new-user <your_username>
 # Upload a file
 pipe upload-file photo.jpg my-photo
 
-# Download a file
+# Download a file (now with streaming!)
 pipe download-file my-photo downloaded-photo.jpg
+
+# Use legacy download endpoint if needed
+pipe download-file my-photo downloaded-photo.jpg --legacy
 
 # Upload a directory
 pipe upload-directory /path/to/folder --tier normal
 
 # Download a directory (NEW!)
 pipe download-directory folder ~/restored/folder --parallel 10
+
+# Manage referrals
+pipe referral generate         # Generate your referral code
+pipe referral show            # Show your code and stats
+pipe referral apply CODE-1234 # Apply someone's referral code
 ```
 
 ### Encryption (NEW!)
@@ -431,6 +439,61 @@ Downloads are automatically base64 decoded. If you encounter issues:
 - **Added**: Multiple account support via `--config` option
 - **Improved**: Better error messages for file not found errors
 - **Note**: Keys generated before this version may need to be regenerated
+
+### v0.2.x (Latest)
+- **Added**: High-performance streaming downloads (no more base64 encoding overhead!)
+- **Added**: Direct streaming from storage to disk (lower memory usage)
+- **Added**: `--legacy` flag for backward compatibility with old download endpoint
+- **Improved**: Download speeds significantly improved, especially for large files
+- **Fixed**: No more timeouts on large file downloads
+
+#### Streaming Downloads
+
+The new streaming download feature provides:
+- **Direct streaming**: Files stream directly from storage to your disk
+- **Lower memory usage**: No need to buffer entire file in memory
+- **Faster downloads**: No base64 encoding/decoding overhead
+- **Progress tracking**: Real-time download progress with accurate speeds
+- **Backward compatibility**: Use `--legacy` flag if you encounter issues
+
+```bash
+# Default: Use new high-performance streaming
+pipe download-file large-video.mp4
+
+# Fallback: Use legacy endpoint if needed
+pipe download-file large-video.mp4 --legacy
+```
+
+### Referral Program
+
+Earn PIPE tokens by referring friends to the Pipe Network!
+
+#### How It Works
+
+1. **Generate Your Code**: Run `pipe referral generate` to get your unique referral code
+2. **Share**: Give your code to friends who want to join Pipe Network
+3. **Earn**: Receive 100 PIPE tokens when they complete a qualifying swap (1+ DevNet SOL)
+
+#### Program Rules
+
+- **Minimum Swap**: Referred user must swap at least 1 DevNet SOL to activate reward
+- **Reward Amount**: 100 PIPE tokens per successful referral
+- **Processing Time**: Rewards may take up to 24 hours to process
+- **Fraud Prevention**: All referrals are subject to automated fraud checks
+- **DevNet SOL**: Get free DevNet SOL at [https://faucet.solana.com/](https://faucet.solana.com/)
+
+#### Commands
+
+```bash
+# Generate your referral code
+pipe referral generate
+
+# Check your referral stats
+pipe referral show
+
+# Apply a referral code (for new users)
+pipe referral apply USERNAME-XXXX
+```
 
 ## License
 

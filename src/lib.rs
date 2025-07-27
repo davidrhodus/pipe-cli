@@ -212,6 +212,8 @@ pub enum Commands {
         key: Option<String>,
         #[arg(long, help = "Use post-quantum decryption (kyber)")]
         quantum: bool,
+        #[arg(long, help = "Use legacy download endpoint (base64 encoded)")]
+        legacy: bool,
     },
 
     /// Delete a file
@@ -1198,6 +1200,17 @@ async fn improved_download_file_with_auth(
     file_name: &str,
     output_path: &str,
 ) -> Result<()> {
+    improved_download_file_with_auth_and_options(client, base_url, creds, file_name, output_path, false).await
+}
+
+async fn improved_download_file_with_auth_and_options(
+    client: &Client,
+    base_url: &str,
+    creds: &SavedCredentials,
+    file_name: &str,
+    output_path: &str,
+    use_legacy: bool,
+) -> Result<()> {
     // Handle directory case - append filename if output_path is a directory
     let output_path = if Path::new(output_path).is_dir() {
         Path::new(output_path).join(file_name).to_string_lossy().to_string()
@@ -1208,7 +1221,13 @@ async fn improved_download_file_with_auth(
     println!("Downloading '{}' to '{}'...", file_name, &output_path);
 
     // Build the URL - NO CREDENTIALS IN URL (security fix)
-    let url = format!("{}/download?file_name={}", base_url, file_name);
+    let url = if use_legacy {
+        // Use legacy endpoint that returns base64-encoded data
+        format!("{}/download?file_name={}", base_url, file_name)
+    } else {
+        // Use the new streaming endpoint for better performance
+        format!("{}/download-stream?file_name={}", base_url, file_name)
+    };
 
     // Create progress bar
     let progress = ProgressBar::new(0);
@@ -1246,37 +1265,58 @@ async fn improved_download_file_with_auth(
         ));
     }
 
-    // Get the full response body
-    let body_bytes = resp.bytes().await?;
-    
-    // The pipe-store server always returns base64-encoded content from the /download endpoint
-    // So we need to decode it
-    let final_bytes = match std::str::from_utf8(&body_bytes) {
-        Ok(text_body) => {
-            // Try Base64 decode
-            match general_purpose::STANDARD.decode(text_body.trim()) {
-                Ok(decoded) => {
-                    progress.set_length(decoded.len() as u64);
-                    decoded
-                }
-                Err(e) => {
-                    // If base64 decode fails, log warning and use original bytes
-                    eprintln!("Warning: Base64 decode failed: {}. Using raw response.", e);
-                    body_bytes.to_vec()
+    if use_legacy {
+        // Legacy mode: Get the full response body and decode base64
+        let body_bytes = resp.bytes().await?;
+        
+        // The legacy /download endpoint returns base64-encoded content
+        let final_bytes = match std::str::from_utf8(&body_bytes) {
+            Ok(text_body) => {
+                // Try Base64 decode
+                match general_purpose::STANDARD.decode(text_body.trim()) {
+                    Ok(decoded) => {
+                        progress.set_length(decoded.len() as u64);
+                        decoded
+                    }
+                    Err(e) => {
+                        // If base64 decode fails, log warning and use original bytes
+                        eprintln!("Warning: Base64 decode failed: {}. Using raw response.", e);
+                        body_bytes.to_vec()
+                    }
                 }
             }
-        }
-        Err(_) => {
-            // Not valid UTF-8, so can't be base64 - use original bytes
-            eprintln!("Warning: Response is not valid UTF-8, cannot be base64. Using raw response.");
-            body_bytes.to_vec()
-        }
-    };
+            Err(_) => {
+                // Not valid UTF-8, so can't be base64 - use original bytes
+                eprintln!("Warning: Response is not valid UTF-8, cannot be base64. Using raw response.");
+                body_bytes.to_vec()
+            }
+        };
 
-    // Write the decoded content
-    tokio::fs::write(&output_path, &final_bytes).await?;
-    progress.set_position(final_bytes.len() as u64);
-    progress.finish_with_message("Download completed");
+        // Write the decoded content
+        tokio::fs::write(&output_path, &final_bytes).await?;
+        progress.set_position(final_bytes.len() as u64);
+        progress.finish_with_message("Download completed");
+    } else {
+        // Streaming mode: Get content length for progress bar
+        let total_size = resp.content_length().unwrap_or(0);
+        progress.set_length(total_size);
+
+        // Stream the response directly to file (no base64 decoding needed for /download-stream)
+        let file = tokio::fs::File::create(&output_path).await?;
+        let mut writer = BufWriter::new(file);
+        let mut stream = resp.bytes_stream();
+        let mut downloaded: u64 = 0;
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            writer.write_all(&chunk).await?;
+            downloaded += chunk.len() as u64;
+            progress.set_position(downloaded);
+        }
+
+        writer.flush().await?;
+        progress.finish_with_message("Download completed");
+    }
 
     println!("File downloaded successfully to: {}", output_path);
     Ok(())
@@ -1787,6 +1827,19 @@ async fn download_file_with_quantum_decryption(
     decrypt_password: bool,
     password: Option<String>,
 ) -> Result<()> {
+    download_file_with_quantum_decryption_and_options(client, base_url, creds, file_name, output_path, decrypt_password, password, false).await
+}
+
+async fn download_file_with_quantum_decryption_and_options(
+    client: &Client,
+    base_url: &str,
+    creds: &SavedCredentials,
+    file_name: &str,
+    output_path: &str,
+    decrypt_password: bool,
+    password: Option<String>,
+    use_legacy: bool,
+) -> Result<()> {
     use crate::quantum::decrypt_and_verify;
     use crate::quantum_keyring::load_quantum_keypair;
     
@@ -1794,7 +1847,7 @@ async fn download_file_with_quantum_decryption(
     
     // Download the quantum-encrypted file
     let temp_path = format!("{}.qenc.tmp", output_path);
-    improved_download_file_with_auth(client, base_url, creds, file_name, &temp_path).await?;
+    improved_download_file_with_auth_and_options(client, base_url, creds, file_name, &temp_path, use_legacy).await?;
     
     // Read the downloaded file
     let quantum_encrypted_data = std::fs::read(&temp_path)?;
@@ -1872,6 +1925,19 @@ async fn download_file_with_decryption(
     decrypt: bool,
     password: Option<String>,
 ) -> Result<()> {
+    download_file_with_decryption_and_options(client, base_url, creds, file_name, output_path, decrypt, password, false).await
+}
+
+async fn download_file_with_decryption_and_options(
+    client: &Client,
+    base_url: &str,
+    creds: &SavedCredentials,
+    file_name: &str,
+    output_path: &str,
+    decrypt: bool,
+    password: Option<String>,
+    use_legacy: bool,
+) -> Result<()> {
     let actual_file_name = if decrypt && !file_name.ends_with(".enc") {
         format!("{}.enc", file_name)
     } else {
@@ -1881,7 +1947,7 @@ async fn download_file_with_decryption(
     if decrypt {
         // Download to temporary file first
         let temp_path = format!("{}.tmp", output_path);
-        improved_download_file_with_auth(client, base_url, creds, &actual_file_name, &temp_path)
+        improved_download_file_with_auth_and_options(client, base_url, creds, &actual_file_name, &temp_path, use_legacy)
             .await?;
 
         // Get password if not provided
@@ -1917,7 +1983,7 @@ async fn download_file_with_decryption(
         }
     } else {
         // Regular download without decryption
-        improved_download_file_with_auth(client, base_url, creds, &actual_file_name, output_path)
+        improved_download_file_with_auth_and_options(client, base_url, creds, &actual_file_name, output_path, use_legacy)
             .await
     }
 }
@@ -3730,6 +3796,7 @@ pub async fn run_cli() -> Result<()> {
             password,
             key: _,
             quantum,
+            legacy,
         } => {
             // Load credentials and check for JWT
             let mut creds = load_credentials_from_file(config_path)?.ok_or_else(|| {
@@ -3762,7 +3829,7 @@ pub async fn run_cli() -> Result<()> {
             let is_quantum_file = file_name.ends_with(".qenc") || quantum;
             
             if is_quantum_file {
-                download_file_with_quantum_decryption(
+                download_file_with_quantum_decryption_and_options(
                     &client,
                     &selected_endpoint,
                     &creds,
@@ -3770,10 +3837,11 @@ pub async fn run_cli() -> Result<()> {
                     &output_path,
                     decrypt,
                     password,
+                    legacy,
                 )
                 .await?;
             } else {
-                download_file_with_decryption(
+                download_file_with_decryption_and_options(
                     &client,
                     &selected_endpoint,
                     &creds,
@@ -3781,6 +3849,7 @@ pub async fn run_cli() -> Result<()> {
                     &output_path,
                     decrypt,
                     password,
+                    legacy,
                 )
                 .await?;
             }
@@ -5827,7 +5896,14 @@ pub async fn run_cli() -> Result<()> {
                         } else {
                             println!("🎉 Your new referral code: {}", code);
                         }
-                        println!("Share this code to earn 100 PIPE when someone uses it!");
+                        
+                        println!("\n📋 Referral Program Rules:");
+                        println!("  • Share this code with friends who want to join Pipe Network");
+                        println!("  • They must swap at least 1 DevNet SOL to activate your reward");
+                        println!("  • You receive 100 PIPE tokens per successful referral");
+                        println!("  • Rewards are subject to fraud prevention checks");
+                        println!("  • Processing may take up to 24 hours");
+                        println!("\n💡 Get free DevNet SOL at: https://faucet.solana.com/");
                     } else {
                         return Err(anyhow!(
                             "Failed to generate referral code. Status={}, Body={}",
@@ -5868,6 +5944,13 @@ pub async fn run_cli() -> Result<()> {
                                 println!("  Successful referrals: {}", stats["successful_referrals"]);
                                 println!("  Pending referrals: {}", stats["pending_referrals"]);
                                 println!("  Total PIPE earned: {}", stats["total_pipe_earned"]);
+                                
+                                println!("\n📋 Referral Program Rules:");
+                                println!("  • Referred user must swap at least 1 DevNet SOL to activate reward");
+                                println!("  • You receive 100 PIPE tokens per successful referral");
+                                println!("  • Rewards are subject to fraud prevention checks");
+                                println!("  • Processing may take up to 24 hours");
+                                println!("\n💡 Get free DevNet SOL at: https://faucet.solana.com/");
                             }
                         }
                         _ => {
@@ -5892,6 +5975,11 @@ pub async fn run_cli() -> Result<()> {
                         let response: serde_json::Value = serde_json::from_str(&text_body)?;
                         if response["success"].as_bool().unwrap_or(false) {
                             println!("✅ {}", response["message"].as_str().unwrap_or("Referral code applied successfully!"));
+                            println!("\nℹ️  Important: To activate the referral reward for your referrer:");
+                            println!("  • You must complete a swap of at least 1 DevNet SOL");
+                            println!("  • Your referrer will receive 100 PIPE tokens");
+                            println!("  • Use 'pipe swap-sol-for-pipe' to get started");
+                            println!("\n💡 Need DevNet SOL? Get it free at: https://faucet.solana.com/");
                         } else {
                             println!("❌ {}", response["message"].as_str().unwrap_or("Failed to apply referral code"));
                         }
