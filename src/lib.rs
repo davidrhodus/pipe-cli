@@ -27,6 +27,7 @@ mod encryption;
 mod keyring;
 mod quantum;
 mod quantum_keyring;
+mod password_utils;
 
 #[cfg(test)]
 mod quantum_integration_test;
@@ -353,6 +354,10 @@ pub enum Commands {
         #[arg(long)]
         user_app_key: Option<String>,
         file_name: String,
+        #[arg(long, help = "Custom title for social media preview")]
+        title: Option<String>,
+        #[arg(long, help = "Custom description for social media preview")]
+        description: Option<String>,
     },
 
     DeletePublicLink {
@@ -591,6 +596,10 @@ pub struct CreatePublicLinkRequest {
     pub user_id: String,
     pub user_app_key: String,
     pub file_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_description: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -3711,6 +3720,8 @@ pub async fn run_cli() -> Result<()> {
             user_id,
             user_app_key,
             file_name,
+            title,
+            description,
         } => {
             // Load credentials and check for JWT
             let mut creds = load_credentials_from_file(config_path)?.ok_or_else(|| {
@@ -3736,9 +3747,15 @@ pub async fn run_cli() -> Result<()> {
             // Use JWT auth if available, otherwise fall back to legacy
             if let Some(ref _auth_tokens) = creds.auth_tokens {
                 // With JWT, send only file name - server will get user info from token
-                let req_body = serde_json::json!({
+                let mut req_body = serde_json::json!({
                     "file_name": file_name
                 });
+                if let Some(ref t) = title {
+                    req_body["custom_title"] = serde_json::json!(t);
+                }
+                if let Some(ref d) = description {
+                    req_body["custom_description"] = serde_json::json!(d);
+                }
                 request = request.json(&req_body);
             } else {
                 // Legacy auth via request body
@@ -3746,6 +3763,8 @@ pub async fn run_cli() -> Result<()> {
                     user_id: creds.user_id.clone(),
                     user_app_key: creds.user_app_key.clone(),
                     file_name,
+                    custom_title: title,
+                    custom_description: description,
                 };
                 request = request.json(&req_body);
             }
@@ -3755,10 +3774,13 @@ pub async fn run_cli() -> Result<()> {
             let text_body = resp.text().await?;
             if status.is_success() {
                 let json: CreatePublicLinkResponse = serde_json::from_str(&text_body)?;
-                println!(
-                    "Public link created! Link hash: {}/publicDownload?hash={}",
-                    base_url, json.link_hash
-                );
+                println!("✓ Public link created successfully!");
+                println!();
+                println!("Direct link (for downloads/playback):");
+                println!("  {}/publicDownload?hash={}", base_url, json.link_hash);
+                println!();
+                println!("Social media link (for sharing):");
+                println!("  {}/publicDownload?hash={}&preview=true", base_url, json.link_hash);
                 println!(
                     "Use `publicDownload?hash={}` to download the file without auth.",
                     json.link_hash
@@ -4127,8 +4149,8 @@ pub async fn run_cli() -> Result<()> {
                 progress_bar: progress.clone(),
             };
 
-            // Limit concurrency to avoid overwhelming local uploads
-            let concurrency_limit = tier_concurrency.min(10); // Cap at 10 for better performance
+            // Use full tier concurrency for maximum performance
+            let concurrency_limit = tier_concurrency;
             println!(
                 "🚀 Using {} concurrent upload slots for {} tier",
                 concurrency_limit,
