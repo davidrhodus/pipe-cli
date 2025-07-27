@@ -21,6 +21,7 @@ tokio-util = { version = "0.7", features = ["io"] }
 walkdir = "2.3.4"
 tempfile = "3.8"
 atty = "0.2"
+regex = "1.10"
 
 # Encryption dependencies
 aes-gcm = "0.10"
