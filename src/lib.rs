@@ -1119,7 +1119,7 @@ pub fn filter_entries_for_download<'a>(
 }
 
 /// Create directory structure for a file path
-async fn ensure_parent_dirs(file_path: &Path) -> Result<()> {
+pub async fn ensure_parent_dirs(file_path: &Path) -> Result<()> {
     if let Some(parent) = file_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -2071,6 +2071,221 @@ pub async fn download_directory(
     println!("Output directory: {}", output_dir);
     
     Ok(())
+}
+
+#[cfg(test)]
+mod download_directory_tests {
+    use super::*;
+    use regex::Regex;
+    use tempfile::TempDir;
+    
+    /// Create a test upload log with sample entries
+    fn create_test_upload_log(log_path: &Path) -> Result<()> {
+        let entries = vec![
+            UploadLogEntry {
+                local_path: "/home/user/photos/vacation/beach.jpg".to_string(),
+                remote_path: "vacation/beach.jpg".to_string(),
+                status: "SUCCESS".to_string(),
+                message: "Directory upload success".to_string(),
+            },
+            UploadLogEntry {
+                local_path: "/home/user/photos/vacation/sunset.jpg".to_string(),
+                remote_path: "vacation/sunset.jpg".to_string(),
+                status: "SUCCESS".to_string(),
+                message: "Directory upload success".to_string(),
+            },
+            UploadLogEntry {
+                local_path: "/home/user/photos/family/portrait.jpg".to_string(),
+                remote_path: "family/portrait.jpg".to_string(),
+                status: "SUCCESS".to_string(),
+                message: "Directory upload success".to_string(),
+            },
+            UploadLogEntry {
+                local_path: "/home/user/docs/report.pdf".to_string(),
+                remote_path: "docs/report.pdf".to_string(),
+                status: "FAIL".to_string(),
+                message: "Upload failed".to_string(),
+            },
+            UploadLogEntry {
+                local_path: "/home/user/docs/summary.pdf".to_string(),
+                remote_path: "docs/summary.pdf".to_string(),
+                status: "SUCCESS".to_string(),
+                message: "Directory upload success".to_string(),
+            },
+        ];
+
+        let mut content = String::new();
+        for entry in entries {
+            content.push_str(&serde_json::to_string(&entry)?);
+            content.push('\n');
+        }
+        
+        fs::write(log_path, content)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_upload_log_entries() {
+        let temp_dir = TempDir::new().unwrap();
+        let log_path = temp_dir.path().join("test-upload-log.json");
+        
+        // Test empty log
+        let entries = read_upload_log_entries(Some(log_path.to_str().unwrap())).unwrap();
+        assert_eq!(entries.len(), 0);
+        
+        // Create test log
+        create_test_upload_log(&log_path).unwrap();
+        
+        // Test reading log
+        let entries = read_upload_log_entries(Some(log_path.to_str().unwrap())).unwrap();
+        assert_eq!(entries.len(), 5);
+        
+        // Verify entries
+        assert_eq!(entries[0].remote_path, "vacation/beach.jpg");
+        assert_eq!(entries[0].status, "SUCCESS");
+        assert_eq!(entries[3].status, "FAIL");
+    }
+
+    #[test]
+    fn test_filter_entries_for_download() {
+        let temp_dir = TempDir::new().unwrap();
+        let log_path = temp_dir.path().join("test-upload-log.json");
+        create_test_upload_log(&log_path).unwrap();
+        
+        let entries = read_upload_log_entries(Some(log_path.to_str().unwrap())).unwrap();
+        
+        // Test prefix filtering
+        let filtered = filter_entries_for_download(&entries, "vacation", None);
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.iter().all(|e| e.remote_path.starts_with("vacation")));
+        
+        // Test status filtering (only SUCCESS)
+        let filtered = filter_entries_for_download(&entries, "docs", None);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].remote_path, "docs/summary.pdf");
+        
+        // Test with regex filter
+        let regex = Regex::new(r".*\.jpg$").unwrap();
+        let filtered = filter_entries_for_download(&entries, "", Some(&regex));
+        assert_eq!(filtered.len(), 3);
+        assert!(filtered.iter().all(|e| e.remote_path.ends_with(".jpg")));
+        
+        // Test combined prefix and regex
+        let regex = Regex::new(r".*beach.*").unwrap();
+        let filtered = filter_entries_for_download(&entries, "vacation", Some(&regex));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].remote_path, "vacation/beach.jpg");
+    }
+
+    #[test]
+    fn test_filter_entries_empty_prefix() {
+        let temp_dir = TempDir::new().unwrap();
+        let log_path = temp_dir.path().join("test-upload-log.json");
+        create_test_upload_log(&log_path).unwrap();
+        
+        let entries = read_upload_log_entries(Some(log_path.to_str().unwrap())).unwrap();
+        
+        // Empty prefix should match all SUCCESS entries
+        let filtered = filter_entries_for_download(&entries, "", None);
+        assert_eq!(filtered.len(), 4); // All SUCCESS entries
+    }
+
+    #[test]
+    fn test_malformed_log_entries() {
+        let temp_dir = TempDir::new().unwrap();
+        let log_path = temp_dir.path().join("test-upload-log.json");
+        
+        // Create log with some malformed entries
+        let content = r#"{"local_path":"good.txt","remote_path":"good.txt","status":"SUCCESS","message":"ok"}
+{this is not valid json}
+{"local_path":"another.txt","remote_path":"another.txt","status":"SUCCESS","message":"ok"}
+{"partial":true
+"#;
+        fs::write(&log_path, content).unwrap();
+        
+        // Should skip malformed entries
+        let entries = read_upload_log_entries(Some(log_path.to_str().unwrap())).unwrap();
+        assert_eq!(entries.len(), 2); // Only valid entries
+    }
+
+    #[tokio::test]
+    async fn test_download_directory_dry_run() {
+        let temp_dir = TempDir::new().unwrap();
+        let log_path = temp_dir.path().join("test-upload-log.json");
+        let output_dir = temp_dir.path().join("output");
+        
+        create_test_upload_log(&log_path).unwrap();
+        
+        // Mock client and credentials
+        let client = reqwest::Client::new();
+        let creds = SavedCredentials {
+            user_id: "test-user".to_string(),
+            user_app_key: "test-key".to_string(),
+            auth_tokens: None,
+            username: Some("testuser".to_string()),
+        };
+        
+        // Test dry run - should not create any files
+        let result = download_directory(
+            &client,
+            "http://localhost:3333",
+            &creds,
+            "vacation",
+            output_dir.to_str().unwrap(),
+            5,
+            true, // dry_run
+            false,
+            None,
+            None,
+            Some(log_path.to_str().unwrap()),
+        ).await;
+        
+        assert!(result.is_ok());
+        assert!(!output_dir.exists()); // No files should be created in dry run
+    }
+
+    #[test]
+    fn test_ensure_parent_dirs() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("deep/nested/path/file.txt");
+        
+        // Test with tokio runtime
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            ensure_parent_dirs(&file_path).await.unwrap();
+        });
+        
+        assert!(file_path.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn test_regex_filtering_edge_cases() {
+        let entries = vec![
+            UploadLogEntry {
+                local_path: "test.txt".to_string(),
+                remote_path: "test.txt".to_string(),
+                status: "SUCCESS".to_string(),
+                message: "ok".to_string(),
+            },
+            UploadLogEntry {
+                local_path: "TEST.TXT".to_string(),
+                remote_path: "TEST.TXT".to_string(),
+                status: "SUCCESS".to_string(),
+                message: "ok".to_string(),
+            },
+        ];
+        
+        // Case sensitive regex
+        let regex = Regex::new(r"test\.txt").unwrap();
+        let filtered = filter_entries_for_download(&entries, "", Some(&regex));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].remote_path, "test.txt");
+        
+        // Case insensitive regex
+        let regex = Regex::new(r"(?i)test\.txt").unwrap();
+        let filtered = filter_entries_for_download(&entries, "", Some(&regex));
+        assert_eq!(filtered.len(), 2);
+    }
 }
 
 // Helper function to handle quantum encrypted file upload
