@@ -74,11 +74,22 @@ pipe new-user <your_username>
 # Upload a file
 pipe upload-file photo.jpg my-photo
 
-# Download a file
+# Download a file (now with streaming!)
 pipe download-file my-photo downloaded-photo.jpg
+
+# Use legacy download endpoint if needed
+pipe download-file my-photo downloaded-photo.jpg --legacy
 
 # Upload a directory
 pipe upload-directory /path/to/folder --tier normal
+
+# Download a directory (NEW!)
+pipe download-directory folder ~/restored/folder --parallel 10
+
+# Manage referrals
+pipe referral generate         # Generate your referral code
+pipe referral show            # Show your code and stats
+pipe referral apply CODE-1234 # Apply someone's referral code
 ```
 
 ### Encryption (NEW!)
@@ -98,6 +109,36 @@ Enter decryption password: ****
 # Encrypt entire directory
 pipe upload-directory /sensitive/data --encrypt
 ```
+
+### Directory Downloads (NEW!)
+
+Pipe-cli now supports downloading entire directories based on your upload history:
+
+```bash
+# Download a directory you previously uploaded
+pipe download-directory photos/vacation ~/restored/vacation
+
+# Download with parallel transfers for speed
+pipe download-directory documents ~/Documents --parallel 10
+
+# See what would be downloaded without actually downloading
+pipe download-directory projects ~/restore --dry-run
+
+# Filter files with regex
+pipe download-directory logs ~/logs --filter ".*2024.*\.log$"
+
+# Download and decrypt
+pipe download-directory encrypted ~/decrypted --decrypt
+```
+
+#### Directory Download Features
+
+- **Upload Log Based**: Uses your local upload history (`~/.pipe-cli-uploads.json`)
+- **Preserves Structure**: Maintains original directory hierarchy
+- **Parallel Downloads**: Configurable concurrency (default: 5)
+- **Filtering**: Regex pattern matching for selective downloads
+- **Dry Run**: Preview what would be downloaded
+- **Decryption Support**: Decrypt files during download
 
 #### Encryption Features
 
@@ -407,6 +448,115 @@ Downloads are automatically base64 decoded. If you encounter issues:
 - **Added**: Multiple account support via `--config` option
 - **Improved**: Better error messages for file not found errors
 - **Note**: Keys generated before this version may need to be regenerated
+
+### v0.2.x (Latest)
+- **Added**: High-performance streaming downloads (no more base64 encoding overhead!)
+- **Added**: Direct streaming from storage to disk (lower memory usage)
+- **Added**: `--legacy` flag for backward compatibility with old download endpoint
+- **Improved**: Download speeds significantly improved, especially for large files
+- **Fixed**: No more timeouts on large file downloads
+
+#### Streaming Downloads
+
+The new streaming download feature provides:
+- **Direct streaming**: Files stream directly from storage to your disk
+- **Lower memory usage**: No need to buffer entire file in memory
+- **Faster downloads**: No base64 encoding/decoding overhead
+- **Progress tracking**: Real-time download progress with accurate speeds
+- **Backward compatibility**: Use `--legacy` flag if you encounter issues
+
+```bash
+# Default: Use new high-performance streaming
+pipe download-file large-video.mp4
+
+# Fallback: Use legacy endpoint if needed
+pipe download-file large-video.mp4 --legacy
+```
+
+### Referral Program
+
+Earn PIPE tokens by referring friends to the Pipe Network!
+
+#### How It Works
+
+1. **Generate Your Code**: Run `pipe referral generate` to get your unique referral code
+2. **Share**: Give your code to friends who want to join Pipe Network
+3. **Earn**: Receive 100 PIPE tokens when they complete a qualifying swap (1+ DevNet SOL)
+
+#### Program Rules
+
+- **Minimum Swap**: Referred user must swap at least 1 DevNet SOL to activate reward
+- **Reward Amount**: 100 PIPE tokens per successful referral
+- **Processing Time**: Rewards may take up to 24 hours to process
+- **Fraud Prevention**: All referrals are subject to automated fraud checks
+- **DevNet SOL**: Get free DevNet SOL at [https://faucet.solana.com/](https://faucet.solana.com/)
+
+#### Commands
+
+```bash
+# Generate your referral code
+pipe referral generate
+
+# Check your referral stats
+pipe referral show
+
+# Apply a referral code (for new users)
+pipe referral apply USERNAME-XXXX
+```
+
+### Token Usage Tracking
+
+Track how your PIPE tokens are being spent on storage vs bandwidth:
+
+```bash
+# View last 30 days (default)
+pipe token-usage
+
+# View detailed breakdown by tier
+pipe token-usage --detailed
+
+# View last 7 days with details
+pipe token-usage --period 7d --detailed
+
+# View last 90 days
+pipe token-usage --period 90d
+
+# View last year
+pipe token-usage --period 365d
+
+# View all time usage
+pipe token-usage --period all
+```
+
+The report shows:
+- 📦 **Storage (Uploads)**: Tokens spent storing your files
+- 🌐 **Bandwidth (Downloads)**: Tokens spent retrieving files
+- 💰 **Total Usage**: Combined costs and token distribution
+  - Currently 100% of tokens are burned (removed from circulation)
+  - Historical data may show treasury allocations from when the split was 90/10
+
+Example output:
+```
+📊 Token Usage Report (30d)
+
+📦 Storage (Uploads):
+   Data uploaded:     1,234.56 GB
+   Tokens spent:      30,863.4000 PIPE
+   → Burned:          27,777.0600 PIPE (90%)
+   → Treasury:        3,086.3400 PIPE (10%)
+
+🌐 Bandwidth (Downloads):
+   Data downloaded:   567.89 GB
+   Tokens spent:      567.8900 PIPE
+   → Burned:          511.1010 PIPE (90%)
+   → Treasury:        56.7890 PIPE (10%)
+
+💰 Total:
+   Data transferred:  1,802.45 GB
+   Tokens spent:      31,431.2900 PIPE
+   → Burned:          28,288.1610 PIPE
+   → Treasury:        3,143.1290 PIPE
+```
 
 ## License
 

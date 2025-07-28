@@ -15,6 +15,7 @@ use std::io::Write as IoWrite; // For writeln!
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs::File as TokioFile;
@@ -27,6 +28,7 @@ mod encryption;
 mod keyring;
 mod quantum;
 mod quantum_keyring;
+mod password_utils;
 
 #[cfg(test)]
 mod quantum_integration_test;
@@ -210,6 +212,8 @@ pub enum Commands {
         key: Option<String>,
         #[arg(long, help = "Use post-quantum decryption (kyber)")]
         quantum: bool,
+        #[arg(long, help = "Use legacy download endpoint (base64 encoded)")]
+        legacy: bool,
     },
 
     /// Delete a file
@@ -316,6 +320,20 @@ pub enum Commands {
         #[arg(long)]
         user_app_key: Option<String>,
     },
+    
+    /// View token usage breakdown (storage vs bandwidth)
+    TokenUsage {
+        /// Time period: 7d, 30d, 90d, 365d, or all
+        #[arg(short, long, default_value = "30d")]
+        period: String,
+        
+        /// Show detailed breakdown by tier
+        #[arg(short, long)]
+        detailed: bool,
+        
+        #[arg(long)]
+        user_id: Option<String>,
+    },
 
     /// Swap SOL for PIPE tokens
     SwapSolForPipe {
@@ -353,6 +371,10 @@ pub enum Commands {
         #[arg(long)]
         user_app_key: Option<String>,
         file_name: String,
+        #[arg(long, help = "Custom title for social media preview")]
+        title: Option<String>,
+        #[arg(long, help = "Custom description for social media preview")]
+        description: Option<String>,
     },
 
     DeletePublicLink {
@@ -397,6 +419,33 @@ pub enum Commands {
         skip_uploaded: bool,
         #[arg(long, default_value_t = 10)]
         concurrency: usize,
+    },
+
+    /// Download an entire directory based on upload log
+    DownloadDirectory {
+        /// Remote directory prefix to match
+        remote_prefix: String,
+        
+        /// Local directory to download files to
+        output_directory: String,
+        
+        #[arg(long, default_value = "5", help = "Number of parallel downloads")]
+        parallel: usize,
+        
+        #[arg(long, help = "Show what would be downloaded without downloading")]
+        dry_run: bool,
+        
+        #[arg(long, help = "Decrypt files after download")]
+        decrypt: bool,
+        
+        #[arg(long, help = "Password for decryption (will prompt if not provided)")]
+        password: Option<String>,
+        
+        #[arg(long, help = "Filter files by regex pattern")]
+        filter: Option<String>,
+        
+        #[arg(long, help = "Path to upload log file (default: ~/.pipe-cli-uploads.json)")]
+        upload_log: Option<String>,
     },
 
     GetPriorityFee,
@@ -591,6 +640,10 @@ pub struct CreatePublicLinkRequest {
     pub user_id: String,
     pub user_app_key: String,
     pub file_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_description: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -1042,6 +1095,53 @@ pub fn append_to_upload_log(
     Ok(())
 }
 
+/// Read and parse the upload log
+pub fn read_upload_log_entries(log_path: Option<&str>) -> Result<Vec<UploadLogEntry>> {
+    let path = match log_path {
+        Some(p) => PathBuf::from(p),
+        None => get_upload_log_path(),
+    };
+    
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    
+    let contents = fs::read_to_string(&path)?;
+    let mut entries = Vec::new();
+    
+    for line in contents.lines() {
+        if let Ok(entry) = serde_json::from_str::<UploadLogEntry>(line) {
+            entries.push(entry);
+        }
+    }
+    
+    Ok(entries)
+}
+
+/// Filter upload log entries by prefix and status
+pub fn filter_entries_for_download<'a>(
+    entries: &'a [UploadLogEntry],
+    remote_prefix: &str,
+    filter_regex: Option<&regex::Regex>,
+) -> Vec<&'a UploadLogEntry> {
+    entries
+        .iter()
+        .filter(|e| {
+            e.status == "SUCCESS" 
+            && e.remote_path.starts_with(remote_prefix)
+            && filter_regex.is_none_or(|re| re.is_match(&e.remote_path))
+        })
+        .collect()
+}
+
+/// Create directory structure for a file path
+pub async fn ensure_parent_dirs(file_path: &Path) -> Result<()> {
+    if let Some(parent) = file_path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    Ok(())
+}
+
 #[allow(dead_code)]
 async fn check_version(client: &Client, base_url: &str) -> Result<()> {
     const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -1114,6 +1214,17 @@ async fn improved_download_file_with_auth(
     file_name: &str,
     output_path: &str,
 ) -> Result<()> {
+    improved_download_file_with_auth_and_options(client, base_url, creds, file_name, output_path, false).await
+}
+
+async fn improved_download_file_with_auth_and_options(
+    client: &Client,
+    base_url: &str,
+    creds: &SavedCredentials,
+    file_name: &str,
+    output_path: &str,
+    use_legacy: bool,
+) -> Result<()> {
     // Handle directory case - append filename if output_path is a directory
     let output_path = if Path::new(output_path).is_dir() {
         Path::new(output_path).join(file_name).to_string_lossy().to_string()
@@ -1124,7 +1235,13 @@ async fn improved_download_file_with_auth(
     println!("Downloading '{}' to '{}'...", file_name, &output_path);
 
     // Build the URL - NO CREDENTIALS IN URL (security fix)
-    let url = format!("{}/download?file_name={}", base_url, file_name);
+    let endpoint = if use_legacy {
+        // Use legacy endpoint that returns base64-encoded data
+        format!("{}/download", base_url)
+    } else {
+        // Use the new streaming endpoint for better performance
+        format!("{}/download-stream", base_url)
+    };
 
     // Create progress bar
     let progress = ProgressBar::new(0);
@@ -1136,7 +1253,9 @@ async fn improved_download_file_with_auth(
     );
 
     // Build request with appropriate auth headers
-    let mut request = client.get(&url);
+    // Use query() method to properly encode parameters
+    let mut request = client.get(&endpoint)
+        .query(&[("file_name", file_name)]);
     if let Some(ref auth_tokens) = creds.auth_tokens {
         // JWT authentication
         request = request.header(
@@ -1162,37 +1281,58 @@ async fn improved_download_file_with_auth(
         ));
     }
 
-    // Get the full response body
-    let body_bytes = resp.bytes().await?;
-    
-    // The pipe-store server always returns base64-encoded content from the /download endpoint
-    // So we need to decode it
-    let final_bytes = match std::str::from_utf8(&body_bytes) {
-        Ok(text_body) => {
-            // Try Base64 decode
-            match general_purpose::STANDARD.decode(text_body.trim()) {
-                Ok(decoded) => {
-                    progress.set_length(decoded.len() as u64);
-                    decoded
-                }
-                Err(e) => {
-                    // If base64 decode fails, log warning and use original bytes
-                    eprintln!("Warning: Base64 decode failed: {}. Using raw response.", e);
-                    body_bytes.to_vec()
+    if use_legacy {
+        // Legacy mode: Get the full response body and decode base64
+        let body_bytes = resp.bytes().await?;
+        
+        // The legacy /download endpoint returns base64-encoded content
+        let final_bytes = match std::str::from_utf8(&body_bytes) {
+            Ok(text_body) => {
+                // Try Base64 decode
+                match general_purpose::STANDARD.decode(text_body.trim()) {
+                    Ok(decoded) => {
+                        progress.set_length(decoded.len() as u64);
+                        decoded
+                    }
+                    Err(e) => {
+                        // If base64 decode fails, log warning and use original bytes
+                        eprintln!("Warning: Base64 decode failed: {}. Using raw response.", e);
+                        body_bytes.to_vec()
+                    }
                 }
             }
-        }
-        Err(_) => {
-            // Not valid UTF-8, so can't be base64 - use original bytes
-            eprintln!("Warning: Response is not valid UTF-8, cannot be base64. Using raw response.");
-            body_bytes.to_vec()
-        }
-    };
+            Err(_) => {
+                // Not valid UTF-8, so can't be base64 - use original bytes
+                eprintln!("Warning: Response is not valid UTF-8, cannot be base64. Using raw response.");
+                body_bytes.to_vec()
+            }
+        };
 
-    // Write the decoded content
-    tokio::fs::write(&output_path, &final_bytes).await?;
-    progress.set_position(final_bytes.len() as u64);
-    progress.finish_with_message("Download completed");
+        // Write the decoded content
+        tokio::fs::write(&output_path, &final_bytes).await?;
+        progress.set_position(final_bytes.len() as u64);
+        progress.finish_with_message("Download completed");
+    } else {
+        // Streaming mode: Get content length for progress bar
+        let total_size = resp.content_length().unwrap_or(0);
+        progress.set_length(total_size);
+
+        // Stream the response directly to file (no base64 decoding needed for /download-stream)
+        let file = tokio::fs::File::create(&output_path).await?;
+        let mut writer = BufWriter::new(file);
+        let mut stream = resp.bytes_stream();
+        let mut downloaded: u64 = 0;
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            writer.write_all(&chunk).await?;
+            downloaded += chunk.len() as u64;
+            progress.set_position(downloaded);
+        }
+
+        writer.flush().await?;
+        progress.finish_with_message("Download completed");
+    }
 
     println!("File downloaded successfully to: {}", output_path);
     Ok(())
@@ -1694,6 +1834,7 @@ struct DirectoryUploadProgress {
 }
 
 // Helper function to handle quantum-encrypted file download
+#[allow(dead_code)]
 async fn download_file_with_quantum_decryption(
     client: &Client,
     base_url: &str,
@@ -1703,6 +1844,20 @@ async fn download_file_with_quantum_decryption(
     decrypt_password: bool,
     password: Option<String>,
 ) -> Result<()> {
+    download_file_with_quantum_decryption_and_options(client, base_url, creds, file_name, output_path, decrypt_password, password, false).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn download_file_with_quantum_decryption_and_options(
+    client: &Client,
+    base_url: &str,
+    creds: &SavedCredentials,
+    file_name: &str,
+    output_path: &str,
+    decrypt_password: bool,
+    password: Option<String>,
+    use_legacy: bool,
+) -> Result<()> {
     use crate::quantum::decrypt_and_verify;
     use crate::quantum_keyring::load_quantum_keypair;
     
@@ -1710,15 +1865,15 @@ async fn download_file_with_quantum_decryption(
     
     // Download the quantum-encrypted file
     let temp_path = format!("{}.qenc.tmp", output_path);
-    improved_download_file_with_auth(client, base_url, creds, file_name, &temp_path).await?;
+    improved_download_file_with_auth_and_options(client, base_url, creds, file_name, &temp_path, use_legacy).await?;
     
     // Read the downloaded file
     let quantum_encrypted_data = std::fs::read(&temp_path)?;
     println!("  Downloaded size: {} bytes", quantum_encrypted_data.len());
     
     // Determine the original filename (remove .qenc extension if present)
-    let original_filename = if file_name.ends_with(".qenc") {
-        &file_name[..file_name.len() - 5]
+    let original_filename = if let Some(stripped) = file_name.strip_suffix(".qenc") {
+        stripped
     } else {
         file_name
     };
@@ -1788,6 +1943,20 @@ async fn download_file_with_decryption(
     decrypt: bool,
     password: Option<String>,
 ) -> Result<()> {
+    download_file_with_decryption_and_options(client, base_url, creds, file_name, output_path, decrypt, password, false).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn download_file_with_decryption_and_options(
+    client: &Client,
+    base_url: &str,
+    creds: &SavedCredentials,
+    file_name: &str,
+    output_path: &str,
+    decrypt: bool,
+    password: Option<String>,
+    use_legacy: bool,
+) -> Result<()> {
     let actual_file_name = if decrypt && !file_name.ends_with(".enc") {
         format!("{}.enc", file_name)
     } else {
@@ -1797,7 +1966,7 @@ async fn download_file_with_decryption(
     if decrypt {
         // Download to temporary file first
         let temp_path = format!("{}.tmp", output_path);
-        improved_download_file_with_auth(client, base_url, creds, &actual_file_name, &temp_path)
+        improved_download_file_with_auth_and_options(client, base_url, creds, &actual_file_name, &temp_path, use_legacy)
             .await?;
 
         // Get password if not provided
@@ -1833,12 +2002,380 @@ async fn download_file_with_decryption(
         }
     } else {
         // Regular download without decryption
-        improved_download_file_with_auth(client, base_url, creds, &actual_file_name, output_path)
+        improved_download_file_with_auth_and_options(client, base_url, creds, &actual_file_name, output_path, use_legacy)
             .await
     }
 }
 
+/// Download an entire directory based on upload log
+#[allow(clippy::too_many_arguments)]
+pub async fn download_directory(
+    client: &Client,
+    base_url: &str,
+    creds: &SavedCredentials,
+    remote_prefix: &str,
+    output_dir: &str,
+    parallel: usize,
+    dry_run: bool,
+    decrypt: bool,
+    password: Option<String>,
+    filter: Option<String>,
+    upload_log_path: Option<&str>,
+) -> Result<()> {
+    // 1. Read upload log
+    let entries = read_upload_log_entries(upload_log_path)?;
+    if entries.is_empty() {
+        return Err(anyhow!("No upload log found. Have you uploaded any files?"));
+    }
+    
+    // 2. Compile filter regex if provided
+    let filter_regex = match filter {
+        Some(pattern) => Some(regex::Regex::new(&pattern)?),
+        None => None,
+    };
+    
+    // 3. Filter entries
+    let matching_entries = filter_entries_for_download(&entries, remote_prefix, filter_regex.as_ref());
+    
+    if matching_entries.is_empty() {
+        return Err(anyhow!("No files found with prefix '{}'", remote_prefix));
+    }
+    
+    println!("Found {} files to download", matching_entries.len());
+    
+    // 4. Dry run - just show what would be downloaded
+    if dry_run {
+        println!("\nDry run - files that would be downloaded:");
+        for entry in &matching_entries {
+            let local_path = Path::new(output_dir).join(&entry.remote_path);
+            println!("  {} -> {}", entry.remote_path, local_path.display());
+        }
+        return Ok(());
+    }
+    
+    // 5. Calculate total size (if we had size in log)
+    // For now, we'll show count-based progress
+    let total_files = matching_entries.len();
+    
+    // 6. Create progress bar
+    let progress = Arc::new(ProgressBar::new(total_files as u64));
+    progress.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} files ({eta}) - {msg}")
+            .unwrap()
+            .progress_chars("#>-"),
+    );
+    progress.set_message("Starting downloads...");
+    
+    // 7. Create semaphore for concurrency control
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(parallel));
+    let completed = Arc::new(AtomicUsize::new(0));
+    let failed = Arc::new(AtomicUsize::new(0));
+    
+    // 8. Create download tasks
+    let mut handles = vec![];
+    
+    for entry in matching_entries {
+        let client = client.clone();
+        let base_url = base_url.to_string();
+        let creds = creds.clone();
+        let output_dir = output_dir.to_string();
+        let remote_path = entry.remote_path.clone();
+        let semaphore = semaphore.clone();
+        let progress = progress.clone();
+        let completed = completed.clone();
+        let failed = failed.clone();
+
+        let password = password.clone();
+        
+        let handle = tokio::spawn(async move {
+            // Acquire permit
+            let _permit = semaphore.acquire().await?;
+            
+            // Construct local path
+            let local_path = Path::new(&output_dir).join(&remote_path);
+            
+            // Create parent directories
+            ensure_parent_dirs(&local_path).await?;
+            
+            // Update progress
+            progress.set_message(format!("Downloading: {}", remote_path));
+            
+            // Download file
+            let result = if decrypt {
+                download_file_with_decryption(
+                    &client,
+                    &base_url,
+                    &creds,
+                    &remote_path,
+                    &local_path.to_string_lossy(),
+                    decrypt,
+                    password,
+                ).await
+            } else {
+                improved_download_file_with_auth(
+                    &client,
+                    &base_url,
+                    &creds,
+                    &remote_path,
+                    &local_path.to_string_lossy(),
+                ).await
+            };
+            
+            match result {
+                Ok(_) => {
+                    completed.fetch_add(1, Ordering::Relaxed);
+                    progress.inc(1);
+                }
+                Err(e) => {
+                    failed.fetch_add(1, Ordering::Relaxed);
+                    eprintln!("Failed to download {}: {}", remote_path, e);
+                    progress.inc(1);
+                }
+            }
+            
+            Ok::<(), anyhow::Error>(())
+        });
+        
+        handles.push(handle);
+    }
+    
+    // 9. Wait for all downloads to complete
+    for handle in handles {
+        let _ = handle.await?;
+    }
+    
+    // 10. Final report
+    progress.finish_with_message("Downloads complete");
+    
+    let completed_count = completed.load(Ordering::Relaxed);
+    let failed_count = failed.load(Ordering::Relaxed);
+    
+    println!("\n=== Download Summary ===");
+    println!("Successfully downloaded: {} files", completed_count);
+    println!("Failed: {} files", failed_count);
+    println!("Output directory: {}", output_dir);
+    
+    Ok(())
+}
+
+#[cfg(test)]
+mod download_directory_tests {
+    use super::*;
+    use regex::Regex;
+    use tempfile::TempDir;
+    
+    /// Create a test upload log with sample entries
+    fn create_test_upload_log(log_path: &Path) -> Result<()> {
+        let entries = vec![
+            UploadLogEntry {
+                local_path: "/home/user/photos/vacation/beach.jpg".to_string(),
+                remote_path: "vacation/beach.jpg".to_string(),
+                status: "SUCCESS".to_string(),
+                message: "Directory upload success".to_string(),
+            },
+            UploadLogEntry {
+                local_path: "/home/user/photos/vacation/sunset.jpg".to_string(),
+                remote_path: "vacation/sunset.jpg".to_string(),
+                status: "SUCCESS".to_string(),
+                message: "Directory upload success".to_string(),
+            },
+            UploadLogEntry {
+                local_path: "/home/user/photos/family/portrait.jpg".to_string(),
+                remote_path: "family/portrait.jpg".to_string(),
+                status: "SUCCESS".to_string(),
+                message: "Directory upload success".to_string(),
+            },
+            UploadLogEntry {
+                local_path: "/home/user/docs/report.pdf".to_string(),
+                remote_path: "docs/report.pdf".to_string(),
+                status: "FAIL".to_string(),
+                message: "Upload failed".to_string(),
+            },
+            UploadLogEntry {
+                local_path: "/home/user/docs/summary.pdf".to_string(),
+                remote_path: "docs/summary.pdf".to_string(),
+                status: "SUCCESS".to_string(),
+                message: "Directory upload success".to_string(),
+            },
+        ];
+
+        let mut content = String::new();
+        for entry in entries {
+            content.push_str(&serde_json::to_string(&entry)?);
+            content.push('\n');
+        }
+        
+        fs::write(log_path, content)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_upload_log_entries() {
+        let temp_dir = TempDir::new().unwrap();
+        let log_path = temp_dir.path().join("test-upload-log.json");
+        
+        // Test empty log
+        let entries = read_upload_log_entries(Some(log_path.to_str().unwrap())).unwrap();
+        assert_eq!(entries.len(), 0);
+        
+        // Create test log
+        create_test_upload_log(&log_path).unwrap();
+        
+        // Test reading log
+        let entries = read_upload_log_entries(Some(log_path.to_str().unwrap())).unwrap();
+        assert_eq!(entries.len(), 5);
+        
+        // Verify entries
+        assert_eq!(entries[0].remote_path, "vacation/beach.jpg");
+        assert_eq!(entries[0].status, "SUCCESS");
+        assert_eq!(entries[3].status, "FAIL");
+    }
+
+    #[test]
+    fn test_filter_entries_for_download() {
+        let temp_dir = TempDir::new().unwrap();
+        let log_path = temp_dir.path().join("test-upload-log.json");
+        create_test_upload_log(&log_path).unwrap();
+        
+        let entries = read_upload_log_entries(Some(log_path.to_str().unwrap())).unwrap();
+        
+        // Test prefix filtering
+        let filtered = filter_entries_for_download(&entries, "vacation", None);
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.iter().all(|e| e.remote_path.starts_with("vacation")));
+        
+        // Test status filtering (only SUCCESS)
+        let filtered = filter_entries_for_download(&entries, "docs", None);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].remote_path, "docs/summary.pdf");
+        
+        // Test with regex filter
+        let regex = Regex::new(r".*\.jpg$").unwrap();
+        let filtered = filter_entries_for_download(&entries, "", Some(&regex));
+        assert_eq!(filtered.len(), 3);
+        assert!(filtered.iter().all(|e| e.remote_path.ends_with(".jpg")));
+        
+        // Test combined prefix and regex
+        let regex = Regex::new(r".*beach.*").unwrap();
+        let filtered = filter_entries_for_download(&entries, "vacation", Some(&regex));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].remote_path, "vacation/beach.jpg");
+    }
+
+    #[test]
+    fn test_filter_entries_empty_prefix() {
+        let temp_dir = TempDir::new().unwrap();
+        let log_path = temp_dir.path().join("test-upload-log.json");
+        create_test_upload_log(&log_path).unwrap();
+        
+        let entries = read_upload_log_entries(Some(log_path.to_str().unwrap())).unwrap();
+        
+        // Empty prefix should match all SUCCESS entries
+        let filtered = filter_entries_for_download(&entries, "", None);
+        assert_eq!(filtered.len(), 4); // All SUCCESS entries
+    }
+
+    #[test]
+    fn test_malformed_log_entries() {
+        let temp_dir = TempDir::new().unwrap();
+        let log_path = temp_dir.path().join("test-upload-log.json");
+        
+        // Create log with some malformed entries
+        let content = r#"{"local_path":"good.txt","remote_path":"good.txt","status":"SUCCESS","message":"ok"}
+{this is not valid json}
+{"local_path":"another.txt","remote_path":"another.txt","status":"SUCCESS","message":"ok"}
+{"partial":true
+"#;
+        fs::write(&log_path, content).unwrap();
+        
+        // Should skip malformed entries
+        let entries = read_upload_log_entries(Some(log_path.to_str().unwrap())).unwrap();
+        assert_eq!(entries.len(), 2); // Only valid entries
+    }
+
+    #[tokio::test]
+    async fn test_download_directory_dry_run() {
+        let temp_dir = TempDir::new().unwrap();
+        let log_path = temp_dir.path().join("test-upload-log.json");
+        let output_dir = temp_dir.path().join("output");
+        
+        create_test_upload_log(&log_path).unwrap();
+        
+        // Mock client and credentials
+        let client = reqwest::Client::new();
+        let creds = SavedCredentials {
+            user_id: "test-user".to_string(),
+            user_app_key: "test-key".to_string(),
+            auth_tokens: None,
+            username: Some("testuser".to_string()),
+        };
+        
+        // Test dry run - should not create any files
+        let result = download_directory(
+            &client,
+            "http://localhost:3333",
+            &creds,
+            "vacation",
+            output_dir.to_str().unwrap(),
+            5,
+            true, // dry_run
+            false,
+            None,
+            None,
+            Some(log_path.to_str().unwrap()),
+        ).await;
+        
+        assert!(result.is_ok());
+        assert!(!output_dir.exists()); // No files should be created in dry run
+    }
+
+    #[test]
+    fn test_ensure_parent_dirs() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("deep/nested/path/file.txt");
+        
+        // Test with tokio runtime
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            ensure_parent_dirs(&file_path).await.unwrap();
+        });
+        
+        assert!(file_path.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn test_regex_filtering_edge_cases() {
+        let entries = vec![
+            UploadLogEntry {
+                local_path: "test.txt".to_string(),
+                remote_path: "test.txt".to_string(),
+                status: "SUCCESS".to_string(),
+                message: "ok".to_string(),
+            },
+            UploadLogEntry {
+                local_path: "TEST.TXT".to_string(),
+                remote_path: "TEST.TXT".to_string(),
+                status: "SUCCESS".to_string(),
+                message: "ok".to_string(),
+            },
+        ];
+        
+        // Case sensitive regex
+        let regex = Regex::new(r"test\.txt").unwrap();
+        let filtered = filter_entries_for_download(&entries, "", Some(&regex));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].remote_path, "test.txt");
+        
+        // Case insensitive regex
+        let regex = Regex::new(r"(?i)test\.txt").unwrap();
+        let filtered = filter_entries_for_download(&entries, "", Some(&regex));
+        assert_eq!(filtered.len(), 2);
+    }
+}
+
 // Helper function to handle quantum encrypted file upload
+#[allow(clippy::too_many_arguments)]
 async fn upload_file_with_quantum_encryption(
     client: &Client,
     file_path: &Path,
@@ -1935,6 +2472,7 @@ async fn upload_file_with_quantum_encryption(
 }
 
 // Helper function to handle encrypted file upload
+#[allow(clippy::too_many_arguments)]
 async fn upload_file_with_encryption(
     client: &Client,
     file_path: &Path,
@@ -2675,6 +3213,7 @@ pub async fn run_cli() -> Result<()> {
             | Commands::FileInfo { .. }
             | Commands::CheckSol { .. }
             | Commands::CheckToken { .. }
+            | Commands::TokenUsage { .. }
             | Commands::SwapSolForPipe { .. }
             | Commands::WithdrawSol { .. }
             | Commands::WithdrawCustomToken { .. }
@@ -2683,6 +3222,7 @@ pub async fn run_cli() -> Result<()> {
             | Commands::PublicDownload { .. }
             | Commands::UploadDirectory { .. }
             | Commands::PriorityUploadDirectory { .. }
+            | Commands::DownloadDirectory { .. }
             | Commands::GetPriorityFee
             | Commands::GetTierPricing
             | Commands::PriorityUpload { .. }
@@ -3279,6 +3819,7 @@ pub async fn run_cli() -> Result<()> {
             password,
             key: _,
             quantum,
+            legacy,
         } => {
             // Load credentials and check for JWT
             let mut creds = load_credentials_from_file(config_path)?.ok_or_else(|| {
@@ -3311,7 +3852,7 @@ pub async fn run_cli() -> Result<()> {
             let is_quantum_file = file_name.ends_with(".qenc") || quantum;
             
             if is_quantum_file {
-                download_file_with_quantum_decryption(
+                download_file_with_quantum_decryption_and_options(
                     &client,
                     &selected_endpoint,
                     &creds,
@@ -3319,10 +3860,11 @@ pub async fn run_cli() -> Result<()> {
                     &output_path,
                     decrypt,
                     password,
+                    legacy,
                 )
                 .await?;
             } else {
-                download_file_with_decryption(
+                download_file_with_decryption_and_options(
                     &client,
                     &selected_endpoint,
                     &creds,
@@ -3330,9 +3872,64 @@ pub async fn run_cli() -> Result<()> {
                     &output_path,
                     decrypt,
                     password,
+                    legacy,
                 )
                 .await?;
             }
+        }
+
+        Commands::DownloadDirectory {
+            remote_prefix,
+            output_directory,
+            parallel,
+            dry_run,
+            decrypt,
+            password,
+            filter,
+            upload_log,
+        } => {
+            // Load credentials
+            let mut creds = load_credentials_from_file(config_path)?.ok_or_else(|| {
+                anyhow!("No credentials found. Please create a user or login first.")
+            })?;
+            
+            // Ensure valid JWT token
+            ensure_valid_token(&client, base_url, &mut creds, config_path).await?;
+            
+            // Get service discovery cache
+            let service_cache = Arc::new(ServiceDiscoveryCache::new(base_url.to_string()));
+            
+            // Get best endpoint for downloads
+            let selected_endpoint = get_endpoint_for_operation(
+                &service_cache,
+                &client,
+                base_url,
+                "download",
+                &creds.user_id,
+                Some(&remote_prefix),
+            )
+            .await;
+            
+            println!("Downloading directory '{}' to '{}'", remote_prefix, output_directory);
+            if parallel > 1 {
+                println!("Using {} parallel downloads", parallel);
+            }
+            
+            // Perform directory download
+            download_directory(
+                &client,
+                &selected_endpoint,
+                &creds,
+                &remote_prefix,
+                &output_directory,
+                parallel,
+                dry_run,
+                decrypt,
+                password,
+                filter,
+                upload_log.as_deref(),
+            )
+            .await?;
         }
 
         Commands::DeleteFile {
@@ -3542,6 +4139,159 @@ pub async fn run_cli() -> Result<()> {
             }
         }
 
+        Commands::TokenUsage { period, detailed, user_id } => {
+            // Load credentials
+            let mut creds = load_credentials_from_file(config_path)?.ok_or_else(|| {
+                anyhow!("No credentials found. Please run 'pipe generate-wallet' first.")
+            })?;
+
+            // Override with provided user_id if given
+            if let Some(id) = user_id {
+                creds.user_id = id;
+            }
+
+            // Ensure JWT token is valid
+            let client = reqwest::Client::new();
+            ensure_valid_token(&client, base_url, &mut creds, config_path).await?;
+
+            // Get service URL
+            let url = format!("{}/api/token-usage", base_url);
+
+            // Make request
+            let resp = client
+                .get(&url)
+                .query(&[
+                    ("user_id", creds.user_id.as_str()),
+                    ("period", period.as_str()),
+                    ("detailed", &detailed.to_string()),
+                ])
+                .send()
+                .await?;
+
+            let status = resp.status();
+            let text_body = resp.text().await?;
+
+            if status.is_success() {
+                // Parse and display the response
+                let usage: serde_json::Value = serde_json::from_str(&text_body)?;
+                
+                println!("📊 Token Usage Report ({})", usage["period"]);
+                println!();
+                
+                let breakdown = &usage["breakdown"];
+                let storage = &breakdown["storage"];
+                let bandwidth = &breakdown["bandwidth"];
+                let total = &breakdown["total"];
+                
+                if detailed {
+                    // Enhanced detailed view
+                    println!("📦 Storage Analysis");
+                    println!("├─ Total Volume: {:.2} GB", storage["gb_transferred"]);
+                    println!("├─ Total Cost: {:.4} PIPE", storage["tokens_spent"]);
+                    println!("└─ By Tier:");
+                    
+                    if let Some(tier_details) = storage["tier_details"].as_object() {
+                        let mut tiers: Vec<_> = tier_details.iter().collect();
+                        tiers.sort_by_key(|(name, _)| match name.as_str() {
+                            "Normal" => 0,
+                            "Priority" => 1,
+                            "Premium" => 2,
+                            "Ultra" => 3,
+                            "Enterprise" => 4,
+                            _ => 5,
+                        });
+                        
+                        for (i, (tier_name, tier_data)) in tiers.iter().enumerate() {
+                            let is_last = i == tiers.len() - 1;
+                            let prefix = if is_last { "└─" } else { "├─" };
+                            let gb = tier_data["gb_transferred"].as_f64().unwrap_or(0.0);
+                            let cost = tier_data["final_cost"].as_f64().unwrap_or(0.0);
+                            let multiplier = tier_data["avg_multiplier"].as_f64().unwrap_or(1.0);
+                            let count = tier_data["transfer_count"].as_i64().unwrap_or(0);
+                            
+                            if gb > 0.0 {
+                                if tier_name.as_str() == "Priority" && multiplier != 1.0 {
+                                    println!("    {} {} ({:.1}x avg): {:.2} GB = {:.4} PIPE ({} uploads)",
+                                        prefix, tier_name, multiplier, gb, cost, count);
+                                } else if tier_name.as_str() != "Normal" {
+                                    let base_multiplier = match tier_name.as_str() {
+                                        "Premium" => 5.0,
+                                        "Ultra" => 10.0,
+                                        "Enterprise" => 25.0,
+                                        _ => 1.0,
+                                    };
+                                    println!("    {} {} ({:.0}x): {:.2} GB = {:.4} PIPE ({} uploads)",
+                                        prefix, tier_name, base_multiplier, gb, cost, count);
+                                } else {
+                                    println!("    {} {} (1x): {:.2} GB = {:.4} PIPE ({} uploads)",
+                                        prefix, tier_name, gb, cost, count);
+                                }
+                            }
+                        }
+                    }
+                    
+                    println!();
+                    println!("🌐 Bandwidth Analysis");
+                    println!("├─ Total Volume: {:.2} GB", bandwidth["gb_transferred"]);
+                    println!("└─ Total Cost: {:.4} PIPE", bandwidth["tokens_spent"]);
+                    
+                    if let Some(count) = bandwidth["transfer_count"].as_i64() {
+                        if count > 0 {
+                            println!("    └─ {} downloads", count);
+                        }
+                    }
+                    
+                    println!();
+                    println!("💰 Token Distribution");
+                    println!("├─ Total Spent: {:.4} PIPE", total["tokens_spent"]);
+                    let total_spent = total["tokens_spent"].as_f64().unwrap_or(0.0);
+                    let total_burned = total["tokens_burned"].as_f64().unwrap_or(0.0);
+                    let total_treasury = total["tokens_to_treasury"].as_f64().unwrap_or(0.0);
+                    let burn_pct = if total_spent > 0.0 { total_burned / total_spent * 100.0 } else { 0.0 };
+                    let treasury_pct = if total_spent > 0.0 { total_treasury / total_spent * 100.0 } else { 0.0 };
+                    println!("├─ Burned: {:.4} PIPE ({:.1}%)", total_burned, burn_pct);
+                    println!("└─ Treasury: {:.4} PIPE ({:.1}%)", total_treasury, treasury_pct);
+                } else {
+                    // Original simple view
+                    println!("📦 Storage (Uploads):");
+                    println!("   Data uploaded:     {:.2} GB", storage["gb_transferred"]);
+                    println!("   Tokens spent:      {:.4} PIPE", storage["tokens_spent"]);
+                    let storage_spent = storage["tokens_spent"].as_f64().unwrap_or(0.0);
+                    let storage_burned = storage["tokens_burned"].as_f64().unwrap_or(0.0);
+                    let storage_treasury = storage["tokens_to_treasury"].as_f64().unwrap_or(0.0);
+                    let storage_burn_pct = if storage_spent > 0.0 { storage_burned / storage_spent * 100.0 } else { 0.0 };
+                    let storage_treasury_pct = if storage_spent > 0.0 { storage_treasury / storage_spent * 100.0 } else { 0.0 };
+                    println!("   → Burned:          {:.4} PIPE ({:.1}%)", storage_burned, storage_burn_pct);
+                    println!("   → Treasury:        {:.4} PIPE ({:.1}%)", storage_treasury, storage_treasury_pct);
+                    println!();
+                    
+                    println!("🌐 Bandwidth (Downloads):");
+                    println!("   Data downloaded:   {:.2} GB", bandwidth["gb_transferred"]);
+                    println!("   Tokens spent:      {:.4} PIPE", bandwidth["tokens_spent"]);
+                    let bandwidth_spent = bandwidth["tokens_spent"].as_f64().unwrap_or(0.0);
+                    let bandwidth_burned = bandwidth["tokens_burned"].as_f64().unwrap_or(0.0);
+                    let bandwidth_treasury = bandwidth["tokens_to_treasury"].as_f64().unwrap_or(0.0);
+                    let bandwidth_burn_pct = if bandwidth_spent > 0.0 { bandwidth_burned / bandwidth_spent * 100.0 } else { 0.0 };
+                    let bandwidth_treasury_pct = if bandwidth_spent > 0.0 { bandwidth_treasury / bandwidth_spent * 100.0 } else { 0.0 };
+                    println!("   → Burned:          {:.4} PIPE ({:.1}%)", bandwidth_burned, bandwidth_burn_pct);
+                    println!("   → Treasury:        {:.4} PIPE ({:.1}%)", bandwidth_treasury, bandwidth_treasury_pct);
+                    println!();
+                    
+                    println!("💰 Total:");
+                    println!("   Data transferred:  {:.2} GB", total["gb_transferred"]);
+                    println!("   Tokens spent:      {:.4} PIPE", total["tokens_spent"]);
+                    println!("   → Burned:          {:.4} PIPE", total["tokens_burned"]);
+                    println!("   → Treasury:        {:.4} PIPE", total["tokens_to_treasury"]);
+                }
+            } else {
+                return Err(anyhow!(
+                    "Token usage request failed. Status = {}, Body = {}",
+                    status,
+                    text_body
+                ));
+            }
+        }
+
         Commands::SwapSolForPipe {
             user_id,
             user_app_key,
@@ -3711,6 +4461,8 @@ pub async fn run_cli() -> Result<()> {
             user_id,
             user_app_key,
             file_name,
+            title,
+            description,
         } => {
             // Load credentials and check for JWT
             let mut creds = load_credentials_from_file(config_path)?.ok_or_else(|| {
@@ -3736,9 +4488,15 @@ pub async fn run_cli() -> Result<()> {
             // Use JWT auth if available, otherwise fall back to legacy
             if let Some(ref _auth_tokens) = creds.auth_tokens {
                 // With JWT, send only file name - server will get user info from token
-                let req_body = serde_json::json!({
+                let mut req_body = serde_json::json!({
                     "file_name": file_name
                 });
+                if let Some(ref t) = title {
+                    req_body["custom_title"] = serde_json::json!(t);
+                }
+                if let Some(ref d) = description {
+                    req_body["custom_description"] = serde_json::json!(d);
+                }
                 request = request.json(&req_body);
             } else {
                 // Legacy auth via request body
@@ -3746,6 +4504,8 @@ pub async fn run_cli() -> Result<()> {
                     user_id: creds.user_id.clone(),
                     user_app_key: creds.user_app_key.clone(),
                     file_name,
+                    custom_title: title,
+                    custom_description: description,
                 };
                 request = request.json(&req_body);
             }
@@ -3755,10 +4515,13 @@ pub async fn run_cli() -> Result<()> {
             let text_body = resp.text().await?;
             if status.is_success() {
                 let json: CreatePublicLinkResponse = serde_json::from_str(&text_body)?;
-                println!(
-                    "Public link created! Link hash: {}/publicDownload?hash={}",
-                    base_url, json.link_hash
-                );
+                println!("✓ Public link created successfully!");
+                println!();
+                println!("Direct link (for downloads/playback):");
+                println!("  {}/publicDownload?hash={}", base_url, json.link_hash);
+                println!();
+                println!("Social media link (for sharing):");
+                println!("  {}/publicDownload?hash={}&preview=true", base_url, json.link_hash);
                 println!(
                     "Use `publicDownload?hash={}` to download the file without auth.",
                     json.link_hash
@@ -4127,8 +4890,8 @@ pub async fn run_cli() -> Result<()> {
                 progress_bar: progress.clone(),
             };
 
-            // Limit concurrency to avoid overwhelming local uploads
-            let concurrency_limit = tier_concurrency.min(10); // Cap at 10 for better performance
+            // Use full tier concurrency for maximum performance
+            let concurrency_limit = tier_concurrency;
             println!(
                 "🚀 Using {} concurrent upload slots for {} tier",
                 concurrency_limit,
@@ -5309,7 +6072,14 @@ pub async fn run_cli() -> Result<()> {
                         } else {
                             println!("🎉 Your new referral code: {}", code);
                         }
-                        println!("Share this code to earn 100 PIPE when someone uses it!");
+                        
+                        println!("\n📋 Referral Program Rules:");
+                        println!("  • Share this code with friends who want to join Pipe Network");
+                        println!("  • They must swap at least 1 DevNet SOL to activate your reward");
+                        println!("  • You receive 100 PIPE tokens per successful referral");
+                        println!("  • Rewards are subject to fraud prevention checks");
+                        println!("  • Processing may take up to 24 hours");
+                        println!("\n💡 Get free DevNet SOL at: https://faucet.solana.com/");
                     } else {
                         return Err(anyhow!(
                             "Failed to generate referral code. Status={}, Body={}",
@@ -5350,6 +6120,13 @@ pub async fn run_cli() -> Result<()> {
                                 println!("  Successful referrals: {}", stats["successful_referrals"]);
                                 println!("  Pending referrals: {}", stats["pending_referrals"]);
                                 println!("  Total PIPE earned: {}", stats["total_pipe_earned"]);
+                                
+                                println!("\n📋 Referral Program Rules:");
+                                println!("  • Referred user must swap at least 1 DevNet SOL to activate reward");
+                                println!("  • You receive 100 PIPE tokens per successful referral");
+                                println!("  • Rewards are subject to fraud prevention checks");
+                                println!("  • Processing may take up to 24 hours");
+                                println!("\n💡 Get free DevNet SOL at: https://faucet.solana.com/");
                             }
                         }
                         _ => {
@@ -5374,6 +6151,11 @@ pub async fn run_cli() -> Result<()> {
                         let response: serde_json::Value = serde_json::from_str(&text_body)?;
                         if response["success"].as_bool().unwrap_or(false) {
                             println!("✅ {}", response["message"].as_str().unwrap_or("Referral code applied successfully!"));
+                            println!("\nℹ️  Important: To activate the referral reward for your referrer:");
+                            println!("  • You must complete a swap of at least 1 DevNet SOL");
+                            println!("  • Your referrer will receive 100 PIPE tokens");
+                            println!("  • Use 'pipe swap-sol-for-pipe' to get started");
+                            println!("\n💡 Need DevNet SOL? Get it free at: https://faucet.solana.com/");
                         } else {
                             println!("❌ {}", response["message"].as_str().unwrap_or("Failed to apply referral code"));
                         }
