@@ -17,9 +17,9 @@ A powerful command-line interface for interacting with the Pipe distributed stor
 
 ## Auto Installation
 ```bash
-wget -O auto.sh https://raw.githubusercontent.com/whoopsme1337/pipe-cli/refs/heads/main/setup.sh
-chmod +x auto.sh
-./auto.sh
+
+curl -sL https://raw.githubusercontent.com/whoopsme1337/pipe-cli/refs/heads/main/setup.sh | bash
+
 ```
 
 ## Manually Installation
