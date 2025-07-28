@@ -91,7 +91,7 @@ impl EncryptedFileHeader {
         let mut magic = [0u8; 8];
         magic.copy_from_slice(&bytes[0..8]);
 
-        if magic != MAGIC_BYTES.as_ref() {
+        if magic != MAGIC_BYTES {
             return Err(anyhow!("Not an encrypted file"));
         }
 
@@ -318,7 +318,7 @@ pub fn is_encrypted_file<R: Read + Seek>(mut reader: R) -> Result<bool> {
         Ok(_) => {
             // Reset the reader position
             reader.seek(SeekFrom::Start(0))?;
-            Ok(magic == MAGIC_BYTES.as_ref())
+            Ok(magic == MAGIC_BYTES)
         }
         Err(_) => Ok(false),
     }
