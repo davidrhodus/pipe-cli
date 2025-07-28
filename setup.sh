@@ -16,9 +16,6 @@ cd pipe
 echo "🔧 Building pipe CLI..."
 cargo install --path .
 
-echo "📁 Moving pipe binary to /usr/local/bin..."
-sudo cp target/release/pipe /usr/local/bin/pipe
-
 echo "✅ Done! Test with:"
 echo ""
 echo "    pipe --help"
