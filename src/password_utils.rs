@@ -1,6 +1,7 @@
 use std::io::{self, BufRead, Write};
 
 /// Read a password from the user, supporting both TTY and piped input
+#[allow(dead_code)]
 pub fn read_password(prompt: &str) -> Result<String, io::Error> {
     // Check if stdin is a TTY
     if atty::is(atty::Stream::Stdin) {
@@ -28,6 +29,7 @@ pub fn read_password(prompt: &str) -> Result<String, io::Error> {
 }
 
 /// Read a password with confirmation
+#[allow(dead_code)]
 pub fn read_password_with_confirmation(
     prompt: &str,
     confirm_prompt: &str,
