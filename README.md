@@ -20,7 +20,6 @@ A powerful command-line interface for interacting with the Pipe distributed stor
 
 curl -sL https://raw.githubusercontent.com/pipenetwork/pipe/main/setup.sh | bash
 
-
 ```
 
 ## Manually Installation
