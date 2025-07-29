@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use tokio::fs;
 use tokio::io::AsyncReadExt;
 use indicatif::{ProgressBar, ProgressStyle, MultiProgress};
-use sha2::{Sha256, Digest};
+use blake3;
 
 use crate::{SavedCredentials, upload_file_with_auth, improved_download_file_with_auth};
 
@@ -18,7 +18,7 @@ pub struct FileState {
     pub path: String,
     pub size: u64,
     pub modified: DateTime<Utc>,
-    pub hash: Option<String>, // SHA256 hash, optional for now
+    pub hash: Option<String>, // Blake3 hash
     pub last_synced: Option<DateTime<Utc>>, // When this file was last synced
     pub sync_version: u32, // Version number for tracking changes
     pub remote_modified: Option<DateTime<Utc>>, // Remote file modification time
@@ -194,11 +194,11 @@ async fn list_local_files_recursive(
     Ok(())
 }
 
-/// Calculate SHA256 hash of a file
+/// Calculate Blake3 hash of a file
 async fn calculate_file_hash(path: &Path) -> Result<String> {
     let mut file = fs::File::open(path).await?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0; 8192];
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = vec![0; 64 * 1024]; // 64KB buffer for better performance
     
     loop {
         let n = file.read(&mut buffer).await?;
@@ -208,7 +208,7 @@ async fn calculate_file_hash(path: &Path) -> Result<String> {
         hasher.update(&buffer[..n]);
     }
     
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
 /// List remote files for a user

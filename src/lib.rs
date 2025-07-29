@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs::File as TokioFile;
-use tokio::io::{AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncWriteExt, AsyncReadExt, BufWriter};
 use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::Semaphore;
 use walkdir::WalkDir;
@@ -197,11 +197,14 @@ pub enum Commands {
         #[arg(long)]
         user_app_key: Option<String>,
 
-        /// Required remote file name on the server
+        /// Required remote file name on the server (or Blake3 hash if --file-id is used)
         file_name: String,
 
         /// Required local file path to store the downloaded file
         output_path: String,
+
+        #[arg(long, help = "Treat file_name as Blake3 hash ID instead of filename")]
+        file_id: bool,
 
         #[arg(long, help = "Decrypt file with password after download")]
         decrypt: bool,
@@ -222,6 +225,8 @@ pub enum Commands {
         #[arg(long)]
         user_app_key: Option<String>,
         file_name: String,
+        #[arg(long, help = "Treat file_name as Blake3 hash ID")]
+        file_id: bool,
     },
 
     /// Get information about a file (size, encryption status, etc.)
@@ -370,6 +375,8 @@ pub enum Commands {
         #[arg(long)]
         user_app_key: Option<String>,
         file_name: String,
+        #[arg(long, help = "Treat file_name as Blake3 hash ID")]
+        file_id: bool,
         #[arg(long, help = "Custom title for social media preview")]
         title: Option<String>,
         #[arg(long, help = "Custom description for social media preview")]
@@ -489,6 +496,35 @@ pub enum Commands {
         additional_months: u64,
     },
 
+    /// Verify file integrity using Blake3 hash
+    VerifyFile {
+        /// File name or Blake3 hash ID
+        file_name: String,
+        
+        #[arg(long, help = "Treat file_name as Blake3 hash ID")]
+        file_id: bool,
+        
+        #[arg(long)]
+        user_id: Option<String>,
+        #[arg(long)]
+        user_app_key: Option<String>,
+    },
+    
+    /// Find uploaded file by local path or hash
+    FindUpload {
+        /// Local file path or Blake3 hash to search for
+        query: String,
+        
+        #[arg(long, help = "Search by Blake3 hash instead of local path")]
+        by_hash: bool,
+    },
+    
+    /// Rehash upload history (calculate Blake3 for old uploads)
+    RehashUploads {
+        #[arg(long, help = "Show progress")]
+        verbose: bool,
+    },
+    
     /// Sync files between local and remote storage
     Sync {
         /// Path to sync (local directory or remote prefix)
@@ -1103,12 +1139,43 @@ pub fn get_final_user_id_and_app_key(
     }
 }
 
+#[derive(Debug)]
+pub struct UploadResult {
+    pub filename: String,
+    pub token_cost: f64,
+    pub blake3_hash: String,
+    pub file_size: u64,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct UploadLogEntry {
     pub local_path: String,
     pub remote_path: String,
     pub status: String,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blake3_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Calculate Blake3 hash of a file
+pub async fn calculate_blake3(file_path: &Path) -> Result<String> {
+    let mut hasher = blake3::Hasher::new();
+    let mut file = tokio::fs::File::open(file_path).await?;
+    let mut buffer = vec![0u8; 64 * 1024]; // 64KB buffer
+    
+    loop {
+        let n = file.read(&mut buffer).await?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buffer[..n]);
+    }
+    
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
 pub fn get_upload_log_path() -> PathBuf {
@@ -1125,6 +1192,17 @@ pub fn append_to_upload_log(
     status: &str,
     message: &str,
 ) -> Result<()> {
+    append_to_upload_log_with_hash(local_path, remote_path, status, message, None, None)
+}
+
+pub fn append_to_upload_log_with_hash(
+    local_path: &str,
+    remote_path: &str,
+    status: &str,
+    message: &str,
+    blake3_hash: Option<String>,
+    file_size: Option<u64>,
+) -> Result<()> {
     let log_path = get_upload_log_path();
     let mut file = OpenOptions::new()
         .create(true)
@@ -1136,6 +1214,9 @@ pub fn append_to_upload_log(
         remote_path: remote_path.to_string(),
         status: status.to_string(),
         message: message.to_string(),
+        blake3_hash,
+        file_size,
+        timestamp: Some(chrono::Utc::now()),
     };
 
     let json_line = serde_json::to_string(&entry)?;
@@ -3957,6 +4038,12 @@ pub async fn run_cli() -> Result<()> {
                 url = format!("{}&tier={}", url, tier_name);
             }
 
+            // Calculate Blake3 hash before upload
+            println!("Calculating file hash...");
+            let blake3_hash = calculate_blake3(local_path).await?;
+            println!("Blake3 hash: {}", &blake3_hash[..16]); // Show first 16 chars
+            let file_size = std::fs::metadata(local_path)?.len();
+
             // Use retry wrapper for single file upload
             let upload_result = if false { // quantum feature was removed
                 // Quantum encryption upload
@@ -3996,12 +4083,15 @@ pub async fn run_cli() -> Result<()> {
                     if token_cost > 0.0 {
                         println!("💰 Cost: {} PIPE tokens", token_cost);
                     }
-                    append_to_upload_log(
+                    append_to_upload_log_with_hash(
                         &file_path,
                         &uploaded_filename,
                         "SUCCESS",
                         &format!("Non-priority upload ({} epochs)", epochs_final),
+                        Some(blake3_hash.clone()),
+                        Some(file_size),
                     )?;
+                    println!("📋 File ID (Blake3): {}", blake3_hash);
                 }
                 Err(e) => {
                     eprintln!("Upload failed for {} => {}", file_path, e);
@@ -4016,6 +4106,7 @@ pub async fn run_cli() -> Result<()> {
             user_app_key,
             file_name,
             output_path,
+            file_id,
             decrypt,
             password,
             key: _,
@@ -4137,6 +4228,7 @@ pub async fn run_cli() -> Result<()> {
             user_id,
             user_app_key,
             file_name,
+            file_id,
         } => {
             // Load credentials and check for JWT
             let mut creds = load_credentials_from_file(config_path)?.ok_or_else(|| {
@@ -4662,6 +4754,7 @@ pub async fn run_cli() -> Result<()> {
             user_id,
             user_app_key,
             file_name,
+            file_id,
             title,
             description,
         } => {
@@ -5755,6 +5848,12 @@ pub async fn run_cli() -> Result<()> {
                 return Ok(());
             }
 
+            // Calculate Blake3 hash before upload
+            println!("Calculating file hash...");
+            let blake3_hash = calculate_blake3(local_path).await?;
+            println!("Blake3 hash: {}", &blake3_hash[..16]); // Show first 16 chars
+            let file_size = std::fs::metadata(local_path)?.len();
+
             // Build URL without credentials (security fix)
             let url = format!(
                 "{}/priorityUpload?file_name={}&epochs={}",
@@ -5779,12 +5878,15 @@ pub async fn run_cli() -> Result<()> {
                     if token_cost > 0.0 {
                         println!("💰 Cost: {} PIPE tokens", token_cost);
                     }
-                    append_to_upload_log(
+                    append_to_upload_log_with_hash(
                         &file_path,
                         &uploaded_filename,
                         "PRIORITY SUCCESS",
                         &format!("Priority upload ({} epochs)", epochs_final),
+                        Some(blake3_hash.clone()),
+                        Some(file_size),
                     )?;
+                    println!("📋 File ID (Blake3): {}", blake3_hash);
                 }
                 Err(e) => {
                     eprintln!("Priority upload failed for {} => {}", file_path, e);
@@ -5917,6 +6019,133 @@ pub async fn run_cli() -> Result<()> {
             }
         }
 
+        Commands::VerifyFile {
+            file_name,
+            file_id,
+            user_id,
+            user_app_key,
+        } => {
+            // Load credentials
+            let mut creds = load_credentials_from_file(config_path)?.ok_or_else(|| {
+                anyhow!("No credentials found. Please create a user or login first.")
+            })?;
+            ensure_valid_token(&client, base_url, &mut creds, config_path).await?;
+            
+            if let Some(uid) = user_id {
+                creds.user_id = uid;
+            }
+            if let Some(key) = user_app_key {
+                creds.user_app_key = key;
+            }
+            
+            println!("Verifying file integrity...");
+            println!("Feature not fully implemented yet - requires server-side support");
+            // TODO: Call server API to get file hash and verify
+        }
+        
+        Commands::FindUpload {
+            query,
+            by_hash,
+        } => {
+            let entries = read_upload_log_entries(None)?;
+            let mut found = Vec::new();
+            
+            for entry in entries {
+                if by_hash {
+                    if let Some(ref hash) = entry.blake3_hash {
+                        if hash.starts_with(&query) {
+                            found.push(entry);
+                        }
+                    }
+                } else {
+                    // Search by local path
+                    if entry.local_path.contains(&query) {
+                        found.push(entry);
+                    }
+                }
+            }
+            
+            if found.is_empty() {
+                println!("No uploads found matching '{}'", query);
+            } else {
+                println!("Found {} matching upload(s):", found.len());
+                for entry in found {
+                    println!("\n  Local: {}", entry.local_path);
+                    println!("  Remote: {}", entry.remote_path);
+                    println!("  Status: {}", entry.status);
+                    if let Some(hash) = entry.blake3_hash {
+                        println!("  Blake3: {}", hash);
+                    }
+                    if let Some(size) = entry.file_size {
+                        println!("  Size: {} bytes", size);
+                    }
+                    if let Some(time) = entry.timestamp {
+                        println!("  Time: {}", time.format("%Y-%m-%d %H:%M:%S UTC"));
+                    }
+                }
+            }
+        }
+        
+        Commands::RehashUploads { verbose } => {
+            let mut entries = read_upload_log_entries(None)?;
+            let total = entries.len();
+            let mut updated = 0;
+            let mut failed = 0;
+            
+            println!("Rehashing {} upload entries...", total);
+            
+            for entry in &mut entries {
+                if entry.blake3_hash.is_none() {
+                    let path = Path::new(&entry.local_path);
+                    if path.exists() {
+                        if verbose {
+                            println!("Hashing: {}", entry.local_path);
+                        }
+                        match calculate_blake3(path).await {
+                            Ok(hash) => {
+                                entry.blake3_hash = Some(hash);
+                                entry.file_size = Some(std::fs::metadata(path)?.len());
+                                updated += 1;
+                            }
+                            Err(e) => {
+                                if verbose {
+                                    eprintln!("Failed to hash {}: {}", entry.local_path, e);
+                                }
+                                failed += 1;
+                            }
+                        }
+                    } else {
+                        if verbose {
+                            println!("File not found: {}", entry.local_path);
+                        }
+                        failed += 1;
+                    }
+                }
+            }
+            
+            // Rewrite the upload log
+            if updated > 0 {
+                let log_path = get_upload_log_path();
+                let mut file = OpenOptions::new()
+                    .create(true)
+                    .truncate(true)
+                    .write(true)
+                    .open(&log_path)?;
+                    
+                for entry in entries {
+                    let json_line = serde_json::to_string(&entry)?;
+                    writeln!(file, "{}", json_line)?;
+                }
+                
+                println!("\n✅ Rehashing complete!");
+                println!("  Updated: {} entries", updated);
+                println!("  Failed: {} entries", failed);
+                println!("  Already hashed: {} entries", total - updated - failed);
+            } else {
+                println!("\nNo entries needed updating.");
+            }
+        }
+        
         Commands::Sync {
             path,
             destination,
