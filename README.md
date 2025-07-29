@@ -5,6 +5,7 @@ A powerful command-line interface for interacting with the Pipe distributed stor
 ## Features
 
 - **Decentralized Storage**: Upload and download files to/from the Pipe network
+- **Directory Sync**: Intelligent sync with `.pipe-sync` metadata tracking and incremental updates
 - **Client-Side Encryption**: AES-256-GCM encryption with password-based key derivation
 - **Quantum-Resistant Encryption**: Post-quantum cryptography using Kyber-1024 (ML-KEM) and Dilithium5 (ML-DSA)
 - **Tiered Upload System**: Multiple upload tiers with different performance characteristics
@@ -65,6 +66,9 @@ pipe new-user <your_username>
 # Upload a file
 pipe upload-file photo.jpg my-photo
 
+# Check upload cost before uploading (NEW!)
+pipe upload-file photo.jpg my-photo --dry-run
+
 # Download a file (now with streaming!)
 pipe download-file my-photo downloaded-photo.jpg
 
@@ -81,6 +85,10 @@ pipe download-directory folder ~/restored/folder --parallel 10
 pipe referral generate         # Generate your referral code
 pipe referral show            # Show your code and stats
 pipe referral apply CODE-1234 # Apply someone's referral code
+
+# Sync directories (NEW!)
+pipe sync ./local/folder remote/folder  # Upload sync
+pipe sync remote/folder ./local/folder  # Download sync (limited)
 ```
 
 ### Encryption (NEW!)
@@ -99,6 +107,58 @@ Enter decryption password: ****
 
 # Encrypt entire directory
 pipe upload-directory /sensitive/data --encrypt
+```
+
+### Directory Sync (NEW!)
+
+Pipe-cli now supports intelligent directory synchronization with metadata tracking:
+
+```bash
+# Sync a local directory to remote (upload)
+pipe sync ./documents docs/backup
+
+# Sync with specific conflict resolution
+pipe sync ./photos vacation-photos --conflict newer
+
+# Dry run to see what would be synced
+pipe sync ./projects remote/projects --dry-run
+
+# Force resync even if files haven't changed
+pipe sync ./data remote/data --force
+```
+
+#### Sync Features
+
+- **Incremental Sync**: Only syncs files that have actually changed
+- **`.pipe-sync` Metadata**: Tracks file states, hashes, and sync history
+- **Conflict Detection**: Detects when both local and remote have changed
+- **SHA256 Verification**: Hash-based change detection for data integrity
+- **Multiple Strategies**: Choose how to resolve conflicts (newer, larger, local, remote, ask)
+- **Dry Run Mode**: Preview changes before syncing
+- **Progress Tracking**: Visual progress bars for all operations
+
+#### How Sync Works
+
+1. **First Sync**: Creates `.pipe-sync` metadata file tracking all file states
+2. **Incremental Syncs**: Compares current files against last sync state
+3. **Change Detection**: Uses size, modification time, and SHA256 hash
+4. **Smart Conflicts**: Only flags files changed on both sides as conflicts
+
+Example `.pipe-sync` file:
+```json
+{
+  "last_sync": "2024-01-15T10:30:00Z",
+  "files": {
+    "document.pdf": {
+      "path": "document.pdf",
+      "size": 102400,
+      "modified": "2024-01-15T09:00:00Z",
+      "hash": "a665a45920422f9d417e4867efdc4fb8...",
+      "last_synced": "2024-01-15T10:30:00Z",
+      "sync_version": 1
+    }
+  }
+}
 ```
 
 ### Directory Downloads (NEW!)
@@ -295,6 +355,28 @@ Configuration file location is determined in this order:
 
 ## Advanced Features
 
+### Cost Estimation (Dry Run)
+
+Check upload costs before committing to an upload:
+
+```bash
+# Estimate cost for a single file upload
+pipe upload-file large-video.mp4 my-video --dry-run
+
+# Check cost for priority upload
+pipe priority-upload data.zip important-data --dry-run
+
+# Works with different tiers
+pipe upload-file dataset.csv my-data --tier ultra --dry-run
+```
+
+The dry run will show:
+- File size
+- Selected upload tier and rate
+- Estimated token cost
+- Your current token balance
+- Whether you have sufficient tokens
+
 ### Skip Already Uploaded Files
 
 When uploading directories, skip files that were successfully uploaded before:
@@ -431,6 +513,14 @@ Downloads are automatically base64 decoded. If you encounter issues:
 - **Key storage**: All keys are stored locally in an encrypted keyring
 
 ## Recent Updates
+
+### v0.3.x (Latest)
+- **Added**: Directory sync with `.pipe-sync` metadata tracking
+- **Added**: Incremental sync - only sync files that have changed
+- **Added**: SHA256 hash-based change detection
+- **Added**: Conflict detection and resolution strategies
+- **Added**: Sync state tracking with version history
+- **Improved**: Efficient sync operations with progress tracking
 
 ### v0.1.x
 - **Fixed**: Base64 decoding now happens automatically for all downloads
