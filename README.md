@@ -18,7 +18,8 @@ A powerful command-line interface for interacting with the Pipe distributed stor
 ## Auto Installation
 ```bash
 
-curl -sL https://raw.githubusercontent.com/pipenetwork/pipe/refs/heads/main/setup.sh | bash
+curl -sL https://raw.githubusercontent.com/pipenetwork/pipe/main/setup.sh | bash
+
 
 ```
 
