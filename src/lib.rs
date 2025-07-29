@@ -2323,30 +2323,45 @@ mod download_directory_tests {
                 remote_path: "vacation/beach.jpg".to_string(),
                 status: "SUCCESS".to_string(),
                 message: "Directory upload success".to_string(),
+                blake3_hash: None,
+                file_size: None,
+                timestamp: None,
             },
             UploadLogEntry {
                 local_path: "/home/user/photos/vacation/sunset.jpg".to_string(),
                 remote_path: "vacation/sunset.jpg".to_string(),
                 status: "SUCCESS".to_string(),
                 message: "Directory upload success".to_string(),
+                blake3_hash: None,
+                file_size: None,
+                timestamp: None,
             },
             UploadLogEntry {
                 local_path: "/home/user/photos/family/portrait.jpg".to_string(),
                 remote_path: "family/portrait.jpg".to_string(),
                 status: "SUCCESS".to_string(),
                 message: "Directory upload success".to_string(),
+                blake3_hash: None,
+                file_size: None,
+                timestamp: None,
             },
             UploadLogEntry {
                 local_path: "/home/user/docs/report.pdf".to_string(),
                 remote_path: "docs/report.pdf".to_string(),
                 status: "FAIL".to_string(),
                 message: "Upload failed".to_string(),
+                blake3_hash: None,
+                file_size: None,
+                timestamp: None,
             },
             UploadLogEntry {
                 local_path: "/home/user/docs/summary.pdf".to_string(),
                 remote_path: "docs/summary.pdf".to_string(),
                 status: "SUCCESS".to_string(),
                 message: "Directory upload success".to_string(),
+                blake3_hash: None,
+                file_size: None,
+                timestamp: None,
             },
         ];
 
@@ -2502,12 +2517,18 @@ mod download_directory_tests {
                 remote_path: "test.txt".to_string(),
                 status: "SUCCESS".to_string(),
                 message: "ok".to_string(),
+                blake3_hash: None,
+                file_size: None,
+                timestamp: None,
             },
             UploadLogEntry {
                 local_path: "TEST.TXT".to_string(),
                 remote_path: "TEST.TXT".to_string(),
                 status: "SUCCESS".to_string(),
                 message: "ok".to_string(),
+                blake3_hash: None,
+                file_size: None,
+                timestamp: None,
             },
         ];
         
@@ -4106,7 +4127,7 @@ pub async fn run_cli() -> Result<()> {
             user_app_key,
             file_name,
             output_path,
-            file_id,
+            file_id: _,
             decrypt,
             password,
             key: _,
@@ -4228,7 +4249,7 @@ pub async fn run_cli() -> Result<()> {
             user_id,
             user_app_key,
             file_name,
-            file_id,
+            file_id: _,
         } => {
             // Load credentials and check for JWT
             let mut creds = load_credentials_from_file(config_path)?.ok_or_else(|| {
@@ -4754,7 +4775,7 @@ pub async fn run_cli() -> Result<()> {
             user_id,
             user_app_key,
             file_name,
-            file_id,
+            file_id: _,
             title,
             description,
         } => {
@@ -6020,8 +6041,8 @@ pub async fn run_cli() -> Result<()> {
         }
 
         Commands::VerifyFile {
-            file_name,
-            file_id,
+            file_name: _,
+            file_id: _,
             user_id,
             user_app_key,
         } => {
