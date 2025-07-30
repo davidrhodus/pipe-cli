@@ -18,6 +18,15 @@ A powerful command-line interface for interacting with the Pipe distributed stor
 - **Blake3 File IDs**: Every file gets a unique Blake3 hash ID for content-based addressing
 - **Integrity Verification**: Automatic integrity checking using Blake3 hashes
 
+## Auto Installation
+```bash
+
+bash <(curl -sSL https://raw.githubusercontent.com/pipenetwork/pipe/main/setup.sh)
+
+```
+
+## Manually Installation
+
 ## Prerequisites
 To build make sure you have [Rust](https://www.rust-lang.org/tools/install) and required system packages installed :
 
