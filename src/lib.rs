@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use reqwest::{Body, Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -1902,7 +1903,7 @@ async fn priority_download_single_file(
     // Build URL without credentials (security fix)
     let url = format!(
         "{}/priorityDownload?file_name={}",
-        base_url, file_name_in_bucket
+        base_url, utf8_percent_encode(file_name_in_bucket, NON_ALPHANUMERIC)
     );
 
     // Add legacy auth headers
@@ -1939,7 +1940,7 @@ async fn priority_download_single_file_with_auth(
     // Build URL without credentials (security fix)
     let url = format!(
         "{}/priorityDownload?file_name={}",
-        base_url, file_name_in_bucket
+        base_url, utf8_percent_encode(file_name_in_bucket, NON_ALPHANUMERIC)
     );
 
     let mut request = client.get(&url);
@@ -4053,7 +4054,9 @@ pub async fn run_cli() -> Result<()> {
 
             let mut url = format!(
                 "{}/{}?file_name={}&epochs={}",
-                selected_endpoint, endpoint, file_name, epochs_final
+                selected_endpoint, endpoint, 
+                utf8_percent_encode(&file_name, NON_ALPHANUMERIC), 
+                epochs_final
             );
             if let Some(tier_name) = tier {
                 url = format!("{}&tier={}", url, tier_name);
@@ -5270,7 +5273,8 @@ pub async fn run_cli() -> Result<()> {
                     };
 
                     let mut url =
-                        format!("{}/{}?file_name={}", selected_endpoint, endpoint, rel_path);
+                        format!("{}/{}?file_name={}", selected_endpoint, endpoint, 
+                            utf8_percent_encode(&rel_path, NON_ALPHANUMERIC));
                     if let Some(tier_name) = &tier_clone {
                         url = format!("{}&tier={}", url, tier_name);
                     }
@@ -5613,7 +5617,7 @@ pub async fn run_cli() -> Result<()> {
                     // Build URL without credentials (security fix)
                     let url = format!(
                         "{}/priorityUpload?file_name={}",
-                        selected_endpoint, rel_path
+                        selected_endpoint, utf8_percent_encode(&rel_path, NON_ALPHANUMERIC)
                     );
 
                     // Use retry wrapper for priority directory uploads
@@ -5878,7 +5882,7 @@ pub async fn run_cli() -> Result<()> {
             // Build URL without credentials (security fix)
             let url = format!(
                 "{}/priorityUpload?file_name={}&epochs={}",
-                base_url, file_name, epochs_final
+                base_url, utf8_percent_encode(&file_name, NON_ALPHANUMERIC), epochs_final
             );
 
             // Use retry wrapper for priority single file upload

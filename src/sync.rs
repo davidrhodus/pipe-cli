@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 use std::time::SystemTime;
+use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
 use serde::{Deserialize, Serialize};
 use anyhow::Result;
 use reqwest::Client;
@@ -162,14 +163,92 @@ async fn get_file_state(path: &Path, relative_path: &str) -> Result<FileState> {
 /// List all files in a directory recursively
 pub async fn list_local_files(base_path: &Path) -> Result<HashMap<String, FileState>> {
     let mut files = HashMap::new();
-    list_local_files_recursive(base_path, base_path, &mut files).await?;
+    list_local_files_recursive(base_path, base_path, &mut files, None).await?;
     Ok(files)
+}
+
+/// List all files in a directory recursively with progress tracking
+pub async fn list_local_files_with_progress(
+    base_path: &Path, 
+    pb: &ProgressBar,
+    partial_state_path: &Path,
+) -> Result<HashMap<String, FileState>> {
+    let mut files = HashMap::new();
+    
+    // Load any existing partial state
+    let partial_state = if partial_state_path.exists() {
+        pb.set_message("Loading partial scan state...");
+        match SyncState::load(partial_state_path).await {
+            Ok(state) => {
+                println!("  Found partial scan with {} files already processed", state.files.len());
+                state.files
+            }
+            Err(_) => HashMap::new()
+        }
+    } else {
+        HashMap::new()
+    };
+    
+    // First pass: count files and total size
+    pb.set_message("Counting files...");
+    let (file_count, total_size) = count_files_recursive(base_path).await?;
+    
+    // Calculate already processed bytes
+    let already_processed: u64 = partial_state.values().map(|f| f.size).sum();
+    
+    // Set up progress bar to track bytes instead of files
+    pb.set_length(total_size);
+    pb.set_position(already_processed);
+    pb.set_message(format!("Building file state map ({} files, {})...", 
+        file_count, format_file_size(total_size)));
+    
+    // Track bytes processed
+    let bytes_processed = Arc::new(AtomicU64::new(already_processed));
+    
+    // Copy partial state into files
+    files.extend(partial_state.clone());
+    
+    list_local_files_recursive_with_bytes(
+        base_path, 
+        base_path, 
+        &mut files, 
+        Some(pb), 
+        &bytes_processed,
+        &partial_state,
+        partial_state_path,
+    ).await?;
+    
+    Ok(files)
+}
+
+/// Count files and total size recursively for progress tracking
+async fn count_files_recursive(path: &Path) -> Result<(u64, u64)> {
+    let mut count = 0;
+    let mut total_size = 0;
+    let mut entries = fs::read_dir(path).await?;
+    
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        let metadata = entry.metadata().await?;
+        
+        if metadata.is_dir() {
+            let (sub_count, sub_size) = Box::pin(count_files_recursive(&path)).await?;
+            count += sub_count;
+            total_size += sub_size;
+        } else if metadata.is_file() {
+            count += 1;
+            total_size += metadata.len();
+        }
+    }
+    
+    Ok((count, total_size))
 }
 
 async fn list_local_files_recursive(
     base_path: &Path,
     current_path: &Path,
     files: &mut HashMap<String, FileState>,
+    pb: Option<&ProgressBar>,
 ) -> Result<()> {
     let mut entries = fs::read_dir(current_path).await?;
     
@@ -179,15 +258,127 @@ async fn list_local_files_recursive(
         
         if metadata.is_dir() {
             // Recurse into subdirectory
-            Box::pin(list_local_files_recursive(base_path, &path, files)).await?;
+            Box::pin(list_local_files_recursive(base_path, &path, files, pb)).await?;
         } else if metadata.is_file() {
             // Get relative path from base
             let relative_path = path.strip_prefix(base_path)?
                 .to_string_lossy()
                 .replace('\\', "/"); // Normalize path separators
             
+            // Update progress bar with current file
+            if let Some(pb) = pb {
+                let size_str = format_file_size(metadata.len());
+                pb.set_message(format!("Hashing: {} ({})", relative_path, size_str));
+            }
+            
             let file_state = get_file_state(&path, &relative_path).await?;
             files.insert(relative_path, file_state);
+            
+            // Increment progress
+            if let Some(pb) = pb {
+                pb.inc(1);
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+async fn list_local_files_recursive_with_bytes(
+    base_path: &Path,
+    current_path: &Path,
+    files: &mut HashMap<String, FileState>,
+    pb: Option<&ProgressBar>,
+    bytes_processed: &Arc<AtomicU64>,
+    partial_state: &HashMap<String, FileState>,
+    partial_state_path: &Path,
+) -> Result<()> {
+    let mut entries = fs::read_dir(current_path).await?;
+    let mut files_since_save = 0;
+    let mut bytes_since_save = 0u64;
+    
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        let metadata = entry.metadata().await?;
+        
+        if metadata.is_dir() {
+            // Recurse into subdirectory
+            Box::pin(list_local_files_recursive_with_bytes(
+                base_path, &path, files, pb, bytes_processed, partial_state, partial_state_path
+            )).await?;
+        } else if metadata.is_file() {
+            let file_size = metadata.len();
+            
+            // Get relative path from base
+            let relative_path = path.strip_prefix(base_path)?
+                .to_string_lossy()
+                .replace('\\', "/"); // Normalize path separators
+            
+            // Check if file already processed in partial state
+            if let Some(existing_state) = partial_state.get(&relative_path) {
+                // Check if file hasn't changed since partial scan
+                let modified = metadata.modified()?
+                    .duration_since(SystemTime::UNIX_EPOCH)?
+                    .as_secs();
+                let current_modified = DateTime::from_timestamp(modified as i64, 0)
+                    .unwrap_or_else(|| Utc::now());
+                
+                if existing_state.size == file_size && existing_state.modified == current_modified {
+                    // File unchanged, skip hashing
+                    continue;
+                }
+            }
+            
+            // Update progress bar with current file
+            if let Some(pb) = pb {
+                let size_str = format_file_size(file_size);
+                let processed = bytes_processed.load(Ordering::Relaxed);
+                let throughput = if pb.elapsed().as_secs() > 0 {
+                    processed / pb.elapsed().as_secs()
+                } else {
+                    0
+                };
+                
+                pb.set_message(format!("Hashing: {} ({}) | Disk read: {}/s", 
+                    relative_path, 
+                    size_str,
+                    format_file_size(throughput)
+                ));
+            }
+            
+            let file_state = get_file_state(&path, &relative_path).await?;
+            files.insert(relative_path, file_state);
+            
+            // Update bytes processed
+            bytes_processed.fetch_add(file_size, Ordering::Relaxed);
+            
+            // Update progress bar with bytes
+            if let Some(pb) = pb {
+                pb.set_position(bytes_processed.load(Ordering::Relaxed));
+            }
+            
+            // Track for periodic save
+            files_since_save += 1;
+            bytes_since_save += file_size;
+            
+            // Save partial state every 100 files or 1GB
+            if files_since_save >= 100 || bytes_since_save >= 1_073_741_824 {
+                if let Some(pb) = pb {
+                    pb.set_message("Saving partial state...");
+                }
+                
+                let partial_sync_state = SyncState {
+                    last_sync: None,
+                    files: files.clone(),
+                };
+                
+                if let Err(e) = partial_sync_state.save(partial_state_path).await {
+                    eprintln!("Warning: Failed to save partial state: {}", e);
+                }
+                
+                files_since_save = 0;
+                bytes_since_save = 0;
+            }
         }
     }
     
@@ -724,7 +915,7 @@ pub async fn sync_command(
     }
     
     // List files
-    println!("📋 Scanning files...");
+    println!("📋 Building file state map for comparison...");
     
     // For downloads, create the directory if it doesn't exist
     if !is_upload && !local_path.exists() {
@@ -732,11 +923,37 @@ pub async fn sync_command(
     }
     
     let local_files = if local_path.exists() {
-        list_local_files(&local_path).await?
+        // Create progress bar for file scanning
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({percent}%) | ETA: {eta_precise} | {msg}")
+                .unwrap()
+                .progress_chars("#>-")
+        );
+        
+        // Path for partial state file
+        let partial_state_path = local_path.join(".pipe-sync.partial");
+        
+        let files = list_local_files_with_progress(&local_path, &pb, &partial_state_path).await?;
+        let total_size: u64 = files.values().map(|f| f.size).sum();
+        pb.finish_with_message(format!("✓ Scanned {} files ({})", files.len(), format_file_size(total_size)));
+        
+        // Clean up partial state file on success
+        if partial_state_path.exists() {
+            if let Err(e) = fs::remove_file(&partial_state_path).await {
+                eprintln!("Warning: Failed to remove partial state file: {}", e);
+            }
+        }
+        
+        files
     } else {
         HashMap::new()
     };
-    println!("  Found {} local files", local_files.len());
+    
+    if local_files.is_empty() && local_path.exists() {
+        println!("  No files found in directory");
+    }
     
     // For now, assume no remote files until we have a proper list API
     let remote_files = HashMap::new();
