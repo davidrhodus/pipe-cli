@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
-use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use reqwest::{Body, Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -38,6 +38,25 @@ mod quantum_integration_test;
 pub const MAX_RETRIES: u32 = 5;
 pub const INITIAL_RETRY_DELAY_MS: u64 = 1000;
 pub const MAX_RETRY_DELAY_MS: u64 = 10000;
+
+// Define the query encoding set for URL parameters
+// This encodes control characters, spaces, and characters that have special meaning in URLs
+const QUERY_ENCODE_SET: &AsciiSet = &CONTROLS
+    .add(b' ')     // Space
+    .add(b'"')     // Quote
+    .add(b'#')     // Hash (fragment identifier)
+    .add(b'<')     // Less than
+    .add(b'>')     // Greater than
+    .add(b'?')     // Question mark (query separator)
+    .add(b'`')     // Backtick
+    .add(b'{')     // Left brace
+    .add(b'}')     // Right brace
+    .add(b'|')     // Pipe
+    .add(b'\\')    // Backslash
+    .add(b'^')     // Caret
+    .add(b'[')     // Left bracket
+    .add(b']')     // Right bracket
+    .add(b'%');    // Percent (to avoid double encoding)
 
 // JWT Authentication structures
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -1648,12 +1667,17 @@ async fn upload_file_with_auth(
         .header("Content-Length", file_size)
         .header("Content-Type", "application/octet-stream");
 
-    // Add JWT auth header if available
+    // Add auth headers - JWT takes precedence
     if let Some(ref auth_tokens) = creds.auth_tokens {
         request = request.header(
             "Authorization",
             format!("Bearer {}", auth_tokens.access_token),
         );
+    } else {
+        // Legacy auth via headers
+        request = request
+            .header("X-User-Id", &creds.user_id)
+            .header("X-User-App-Key", &creds.user_app_key);
     }
 
     let resp = request.body(body).send().await?;
@@ -1903,7 +1927,7 @@ async fn priority_download_single_file(
     // Build URL without credentials (security fix)
     let url = format!(
         "{}/priorityDownload?file_name={}",
-        base_url, utf8_percent_encode(file_name_in_bucket, NON_ALPHANUMERIC)
+        base_url, utf8_percent_encode(file_name_in_bucket, QUERY_ENCODE_SET)
     );
 
     // Add legacy auth headers
@@ -1940,7 +1964,7 @@ async fn priority_download_single_file_with_auth(
     // Build URL without credentials (security fix)
     let url = format!(
         "{}/priorityDownload?file_name={}",
-        base_url, utf8_percent_encode(file_name_in_bucket, NON_ALPHANUMERIC)
+        base_url, utf8_percent_encode(file_name_in_bucket, QUERY_ENCODE_SET)
     );
 
     let mut request = client.get(&url);
@@ -4055,7 +4079,7 @@ pub async fn run_cli() -> Result<()> {
             let mut url = format!(
                 "{}/{}?file_name={}&epochs={}",
                 selected_endpoint, endpoint, 
-                utf8_percent_encode(&file_name, NON_ALPHANUMERIC), 
+                utf8_percent_encode(&file_name, QUERY_ENCODE_SET), 
                 epochs_final
             );
             if let Some(tier_name) = tier {
@@ -5274,7 +5298,7 @@ pub async fn run_cli() -> Result<()> {
 
                     let mut url =
                         format!("{}/{}?file_name={}", selected_endpoint, endpoint, 
-                            utf8_percent_encode(&rel_path, NON_ALPHANUMERIC));
+                            utf8_percent_encode(&rel_path, QUERY_ENCODE_SET));
                     if let Some(tier_name) = &tier_clone {
                         url = format!("{}&tier={}", url, tier_name);
                     }
@@ -5617,7 +5641,7 @@ pub async fn run_cli() -> Result<()> {
                     // Build URL without credentials (security fix)
                     let url = format!(
                         "{}/priorityUpload?file_name={}",
-                        selected_endpoint, utf8_percent_encode(&rel_path, NON_ALPHANUMERIC)
+                        selected_endpoint, utf8_percent_encode(&rel_path, QUERY_ENCODE_SET)
                     );
 
                     // Use retry wrapper for priority directory uploads
@@ -5882,7 +5906,7 @@ pub async fn run_cli() -> Result<()> {
             // Build URL without credentials (security fix)
             let url = format!(
                 "{}/priorityUpload?file_name={}&epochs={}",
-                base_url, utf8_percent_encode(&file_name, NON_ALPHANUMERIC), epochs_final
+                base_url, utf8_percent_encode(&file_name, QUERY_ENCODE_SET), epochs_final
             );
 
             // Use retry wrapper for priority single file upload
@@ -6183,9 +6207,12 @@ pub async fn run_cli() -> Result<()> {
             parallel,
         } => {
             // Load credentials
-            let creds = load_credentials_from_file(config_path)?.ok_or_else(|| {
+            let mut creds = load_credentials_from_file(config_path)?.ok_or_else(|| {
                 anyhow!("No credentials found. Please create a user or login first.")
             })?;
+
+            // Ensure we have valid JWT token if available
+            ensure_valid_token(&client, base_url, &mut creds, config_path).await?;
 
             // Parse conflict strategy
             let conflict_strategy = sync::ConflictStrategy::from_str(&conflict)
